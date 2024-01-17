@@ -62,7 +62,7 @@ def detect_corners(image, results_dir_path, method="Harris", plot=True, **kwargs
             # Draw corners on the original image
             for y, x in corners:
                 cv2.drawMarker(_img, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 10, 1)
-            
+
             # Save the corner detection output
             corner_image_path = osp.join(results_dir_path, f"corners_harris_{image_name}")
             cv2.imwrite(corner_image_path, _img)
@@ -93,7 +93,7 @@ def detect_corners(image, results_dir_path, method="Harris", plot=True, **kwargs
 
 
 def anms(c_img, image, results_dir_path, n_best=150, plot=True, min_distance=3, threshold=0.001):
-    
+
     image_name = image[0].split("/")[-1]
     coordinates = peak_local_max(c_img, min_distance=min_distance, threshold_rel=threshold)
 
@@ -102,24 +102,45 @@ def anms(c_img, image, results_dir_path, n_best=150, plot=True, min_distance=3, 
 
     for i in range(len(coordinates)):
         for j in range(len(coordinates)):
-            if(c_img[coordinates[i][0]][coordinates[i][1]] < c_img[coordinates[j][0]][coordinates[j][1]]):
+            if(c_img[coordinates[i][0], coordinates[i][1]] < c_img[coordinates[j][0], coordinates[j][1]]):
                 _ED = (coordinates[i][0] - coordinates[j][0])**2 + (coordinates[i][1] - coordinates[j][1])**2
-            
+
             if _ED is not None and _ED < _r[i]:
                 _r[i] = _ED
 
-    points = np.argsort(_r)[:n_best]
+    best_corners_idx = np.argsort(_r)[::-1][:n_best]
+    best_corners = coordinates[best_corners_idx]
 
     _img = image[1].copy()
-    for point in points:
-        cv2.drawMarker(_img, (coordinates[point][1], coordinates[point][0]), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 10, 1)
+    for corner in best_corners:
+        cv2.drawMarker(_img, (corner[1], corner[0]), (255, 0, 0), cv2.MARKER_TILTED_CROSS, 10, 1)
         cv2.imwrite(osp.join(results_dir_path, f"ANMS_{image_name}"), _img)
+
+    return best_corners
+
+def get_feature_descriptors(image, keypoints, results_dir_path, **kwargs):
+
+    _img = image[1].copy()
+    _img = cv2.copyMakeBorder(image[1], 20, 20, 20, 20, cv2.BORDER_CONSTANT, None, value=0) # padding
+    patch = np.zeros((41, 41, 3))
+    feature_descriptors = []
+
+    for point in keypoints:
+        patch = _img[point[0]:point[0]+40, point[1]:point[1]+40, :].copy()
+        blurred_patch = cv2.GaussianBlur(patch, (5, 5), 0)
+        subsampled_patch = cv2.resize(blurred_patch, (8, 8))
+        subsampled_vector = subsampled_patch.flatten()
+        normalized_vector = (subsampled_vector-np.mean(subsampled_vector))/np.std(subsampled_vector)
+        feature_descriptors.append(normalized_vector)
+
+    return feature_descriptors
+
 
 def main():
     # Add any Command Line arguments here
     Parser = argparse.ArgumentParser()
     Parser.add_argument('--NumFeatures', default=5000, type=int, help='Number of best features to extract from each image, Default:100')
-    Parser.add_argument('--SelectTrain', type=lambda x: bool(distutils.util.strtobool(x)), default=True, help='Choose the set to run the test on, Default:True')
+    Parser.add_argument('--SelectTrain', action='store_false', help='Choose the set to run the test on, Default:True')
     Parser.add_argument('--ImageSet', default="Set1", help='Choose the set to run the test on Options are Set1, Set2, Set3, CustomSet1, CustomSet2, Default:Set1')
     Parser.add_argument('--SelectDetector', default="Harris", help='Choose the detector to use Options are Harris, ShiTomasi, Default:Harris')
 
@@ -142,28 +163,33 @@ def main():
 
     # Store the images in a list of [[image_path, original_image, grayscale_image], ...]
     images = read_images(DATA, SelectTrain, ImageSet=ImageSet)
+    keypoints = []
+    feature_descriptors = []
 
-    """
-	Corner Detection
-	Save Corner detection output as corners.png
-	"""
     # Sanity check
     for image in images: # image is a list of [image_path, image, image_grayscale]
+        """
+        Corner Detection
+        Save Corner detection output as corners.png
+        """
         corner_det_image = detect_corners(image, results_dir_path, method=SelectDetector, plot=True, NumFeatures=NumFeatures)
         # TODO: Apply threshold relative to standard deviation
         # Currently, the threshold is 0.01 * max value of the standardized corner detection output
 
-        anms(corner_det_image, image, results_dir_path, plot=True, min_distance=9) 
+        """
+        Perform ANMS: Adaptive Non-Maximal Suppression
+        Save ANMS output as anms.png
+        """
+        keypoints_ = anms(corner_det_image, image, results_dir_path, plot=True, min_distance=9)
+        keypoints.append(keypoints_)
 
-    """
-	Perform ANMS: Adaptive Non-Maximal Suppression
-	Save ANMS output as anms.png
-	"""
+        """
+        Feature Descriptors
+        Save Feature Descriptor output as FD.png
+        """
+        feature_descriptors_ = get_feature_descriptors(image, keypoints_, results_dir_path)
+        feature_descriptors.append(feature_descriptors_)
 
-    """
-	Feature Descriptors
-	Save Feature Descriptor output as FD.png
-	"""
 
     """
 	Feature Matching
