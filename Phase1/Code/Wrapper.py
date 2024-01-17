@@ -33,16 +33,7 @@ def normalize_image(image):
     return image.astype(np.float32)
 
 def read_images(data_dir, train=True, **kwargs):
-    """
-    Read a set of images for Panorama stitching
 
-    :param data_dir: DataSet directory
-    :type data_dir: str
-    :param train: Select Train or Test set, defaults to True
-    :type train: bool, optional
-    :return: List of images, format: [[image_name, original_image, image_grayscale], ...]
-    :rtype: list
-    """
     images = []
 
     image_path = osp.join(data_dir, "Train" if train else "Test", kwargs["ImageSet"])
@@ -56,35 +47,13 @@ def read_images(data_dir, train=True, **kwargs):
     return images
 
 def detect_corners(image, results_dir_path, method="Harris", plot=True, **kwargs):
-    """
-    Corner Detection with Harris or Shi-Tomasi
 
-    :param image: list of [image_path, image, image_grayscale]
-    :type image: list
-    :param results_dir_path: Path to save the results
-    :type results_dir_path: str
-    :param method: Detection method, defaults to "Harris"
-    :type method: str, optional
-    :param plot: Flag for plotting, defaults to True
-    :type plot: bool, optional
-    :return: Corner detection output
-    :rtype: np.ndarray
-    """
     image_name = image[0].split("/")[-1]
     if method == "Harris":
         print("Detecting corners with Harris... for image: ", image_name)
 
         # Apply Harris Corner Detection
-        corner_det_image = cv2.cornerHarris(image[2], blockSize=3, ksize=11, k=0.04)
-
-        # Normalize the corner detection output
-        # corner_det_image = normalizeImage(corner_det_image)
-
-        # Standardize the corner detection output
-        mean = np.mean(corner_det_image)
-        std = np.std(corner_det_image)
-        standardized_corner_det_image = (corner_det_image - mean) / std
-        # standardized_corner_det_image = normalizeImage(standardized_corner_det_image)      
+        corner_det_image = cv2.cornerHarris(image[2], blockSize=7, ksize=11, k=0.04)
 
         if plot:
             _img = image[1].copy()
@@ -98,7 +67,6 @@ def detect_corners(image, results_dir_path, method="Harris", plot=True, **kwargs
             corner_image_path = osp.join(results_dir_path, f"corners_harris_{image_name}")
             cv2.imwrite(corner_image_path, _img)
 
-        return corner_det_image, std, standardized_corner_det_image
 
     # Just a function to detect corners with Shi-Tomasi
     # Not to be used for image stitching
@@ -115,61 +83,16 @@ def detect_corners(image, results_dir_path, method="Harris", plot=True, **kwargs
                     for i in corners:
                         x, y = i.ravel()
                         cv2.drawMarker(_img, (int(x), int(y)), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 10, 1)
-                        # cv2.circle(_img, (int(x), int(y)), 3, (0, 0, 255), -1)  # Ensure coordinates are integers
                         corner_det_image[int(y), int(x)] = 1
-
-            mean = np.mean(corner_det_image)
-            std = np.std(corner_det_image)
-            standardized_corner_det_image = (corner_det_image - mean) / std
 
             # Save the Shi-Tomasi corner detection output
             shi_tomasi_image_path = osp.join(results_dir_path, f"corners_shi_tomasi_{image_name}")
             cv2.imwrite(shi_tomasi_image_path, _img)
 
-        return corner_det_image, std, standardized_corner_det_image
-    
-def apply_local_maxima(standardized_corner_det_image, image_path, results_dir_path, plot=True, min_distance=3, threshold=0.01):
-    # (standardized_corner_det_image, image[0], results_dir_path, plot=True, min_distance=3, threshold_rel=std*0.01)
-    """
-    Apply Local Maxima to the output of Harris Corner Detection
-
-    :param corner_det_image: Output from Harris Corner Detection
-    :type corner_det_image: np.ndarray
-    :param original_image: Original image
-    :type original_image: np.ndarray
-    :param results_dir_path: Path to save the results
-    :type results_dir_path: str
-    :param image_name: Name of the image file
-    :type image_name: str
-    :param min_distance: Minimum number of pixels separating peaks
-    :type min_distance: int
-    :param threshold_rel: Relative threshold to select the peaks
-    :type threshold_rel: float
-    :param plot: Flag for plotting, defaults to True
-    :type plot: bool, optional
-    """
-    # Read the original image to plot:
-    og_image = cv2.imread(image_path)
-    image_name = image_path.split("/")[-1]
-
-    print(f"Minimum distance between peaks: {min_distance}")
-
-    # Find local maxima
-    coordinates = peak_local_max(standardized_corner_det_image, min_distance=min_distance, threshold_rel=threshold)
-
-    if plot:
-        # Draw local maxima points on the original image
-        for y, x in coordinates:
-            cv2.drawMarker(og_image, (x, y), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 20, 1)
-
-        # Save the image with local maxima
-        local_maxima_image_path = osp.join(results_dir_path, f"local_maxima_{image_name}")
-        cv2.imwrite(local_maxima_image_path, og_image)
-
-    return coordinates
+    return corner_det_image
 
 
-def anms(c_img, image, results_dir_path, n_best=250, plot=True, min_distance=3, threshold=0.01):
+def anms(c_img, image, results_dir_path, n_best=150, plot=True, min_distance=3, threshold=0.001):
     
     image_name = image[0].split("/")[-1]
     coordinates = peak_local_max(c_img, min_distance=min_distance, threshold_rel=threshold)
@@ -189,7 +112,7 @@ def anms(c_img, image, results_dir_path, n_best=250, plot=True, min_distance=3, 
 
     _img = image[1].copy()
     for point in points:
-        cv2.drawMarker(_img, (coordinates[point][1], coordinates[point][0]), (255, 0, 0), cv2.MARKER_TILTED_CROSS, 10, 1)
+        cv2.drawMarker(_img, (coordinates[point][1], coordinates[point][0]), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 10, 1)
         cv2.imwrite(osp.join(results_dir_path, f"ANMS_{image_name}"), _img)
 
 def main():
@@ -226,15 +149,11 @@ def main():
 	"""
     # Sanity check
     for image in images: # image is a list of [image_path, image, image_grayscale]
-        corner_det_image, std, standardized_corner_det_image = detect_corners(image, results_dir_path, method=SelectDetector, plot=True, NumFeatures=NumFeatures)
-        # print(f"Standard deviation of corner detection output for image {image[0].split('/')[-1]}: {std}")
-        # print(f"Max value of standardized corner detection output: {np.max(standardized_corner_det_image)}")
-        # print(f"Min value of standardized corner detection output: {np.min(standardized_corner_det_image)}")
+        corner_det_image = detect_corners(image, results_dir_path, method=SelectDetector, plot=True, NumFeatures=NumFeatures)
         # TODO: Apply threshold relative to standard deviation
         # Currently, the threshold is 0.01 * max value of the standardized corner detection output
 
-        # coordinates = apply_local_maxima(standardized_corner_det_image, image, results_dir_path, plot=True, min_distance=5) 
-        anms(standardized_corner_det_image, image, results_dir_path, plot=True, min_distance=5) 
+        anms(corner_det_image, image, results_dir_path, plot=True, min_distance=9) 
 
     """
 	Perform ANMS: Adaptive Non-Maximal Suppression
