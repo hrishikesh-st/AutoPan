@@ -101,7 +101,7 @@ def anms(c_img, image, results_dir_path, n_best=150, plot=True, min_distance=3, 
     _ED = None
 
     for i in range(len(coordinates)):
-        for j in range(len(coordinates)):
+        for j in range(i+1, len(coordinates)):
             if(c_img[coordinates[i][0], coordinates[i][1]] < c_img[coordinates[j][0], coordinates[j][1]]):
                 _ED = (coordinates[i][0] - coordinates[j][0])**2 + (coordinates[i][1] - coordinates[j][1])**2
 
@@ -122,13 +122,13 @@ def anms(c_img, image, results_dir_path, n_best=150, plot=True, min_distance=3, 
 
 def get_feature_descriptors(image, keypoints, results_dir_path, **kwargs):
 
-    _img = image[1].copy()
-    _img = cv2.copyMakeBorder(image[1], 20, 20, 20, 20, cv2.BORDER_CONSTANT, None, value=0) # padding
-    patch = np.zeros((41, 41, 3))
+    _img = image[2].copy()
+    _img = cv2.copyMakeBorder(image[2], 20, 20, 20, 20, cv2.BORDER_CONSTANT, None, value=0) # padding
+    patch = np.zeros((41, 41))
     feature_descriptors = []
 
     for point in keypoints:
-        patch = _img[int(point.pt[1]):int(point.pt[1])+40, int(point.pt[0]):int(point.pt[0])+40, :].copy()
+        patch = _img[int(point.pt[1]):int(point.pt[1])+41, int(point.pt[0]):int(point.pt[0])+41].copy()
         blurred_patch = cv2.GaussianBlur(patch, (5, 5), 0)
         subsampled_patch = cv2.resize(blurred_patch, (8, 8))
         subsampled_vector = subsampled_patch.flatten()
@@ -145,17 +145,20 @@ def match_features(kp1, fd1, kp2, fd2):
     for i, f1 in enumerate(fd1):
         _best_dist_1 = np.inf
         _best_dist_2 = np.inf
+        _idx = 0
+
         for j, f2 in enumerate(fd2):
             _dist = np.linalg.norm(f1-f2)
             if _dist < _best_dist_1:
                 _best_dist_2 = _best_dist_1
                 _best_dist_1 = _dist
+                _idx = j
             elif _dist < _best_dist_2:
                 _best_dist_2 = _dist
 
-            if _best_dist_1/_best_dist_2 < 0.7:
-                matches.append(cv2.DMatch(i, j, _dist))
-                mapping.append([kp1[i].pt[0], kp1[i].pt[1], kp2[j].pt[0], kp2[j].pt[1], i, j, _dist])
+        if _best_dist_1/_best_dist_2 < 0.75:
+            matches.append(cv2.DMatch(i, _idx, _dist))
+            mapping.append([kp1[i].pt[0], kp1[i].pt[1], kp2[_idx].pt[0], kp2[_idx].pt[1], i, _idx, _best_dist_1])
 
     return matches, mapping
 
@@ -183,16 +186,16 @@ def ransac(mapping, tau, n_max=1000):
         pairs = [mapping[i] for i in np.random.choice(len(mapping), 4)]
         H = find_homography(pairs)
 
+        temp_inliers = []
+        temp_matches = []
         for pair in mapping:
             x1, y1, x2, y2, i, j, _dist = pair
-            temp_inliers = []
-            temp_matches = []
             _H = H.flatten().tolist()
             x2_hat = _H[0]*x1 + _H[1]*y1 + _H[2]
             y2_hat = _H[3]*x1 + _H[4]*y1 + _H[5]
             z2_hat = _H[6]*x1 + _H[7]*y1 + _H[8]
 
-            if abs(x2_hat/(z2_hat+1e-6) - x2) + abs(y2_hat/(z2_hat+1e-6) - y2) < tau:
+            if abs(x2_hat/(z2_hat+1e-6) - x2) + abs(y2_hat/(z2_hat+1e-6) - y2) < tau: # TODO: Check logic
                 temp_inliers.append([x1, y1, x2, y2, i, j, _dist])
                 temp_matches.append(cv2.DMatch(i, j, _dist))
 
@@ -269,13 +272,13 @@ def main():
     # [(a, b) for idx, a in enumerate(test_list) for b in test_list[idx + 1:]]
 
     matches, mapping = match_features(keypoints[0], feature_descriptors[0], keypoints[1], feature_descriptors[1])
-    _matched_img = cv2.drawMatches(images[0][1], keypoints[0], images[1][1], keypoints[1], matches, None, matchColor=(0, 255, 0), flags=2)
+    _matched_img = cv2.drawMatches(images[0][1], keypoints[0], images[1][1], keypoints[1], matches, None, matchColor=(0, 255, 255), flags=2)
     cv2.imwrite(osp.join(results_dir_path, "matching.png"), _matched_img)
 
     """
 	Refine: RANSAC, Estimate Homography
 	"""
-    H, inliers, inlier_matches = ransac(mapping, tau=700, n_max=1000)
+    H, inliers, inlier_matches = ransac(mapping, tau=50, n_max=2000)
     _matched_img = cv2.drawMatches(images[0][1], keypoints[0], images[1][1], keypoints[1], inlier_matches, None, matchColor=(0, 255, 0), flags=2)
     cv2.imwrite(osp.join(results_dir_path, "matching_inliers.png"), _matched_img)
 
