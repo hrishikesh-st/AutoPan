@@ -140,6 +140,7 @@ def get_feature_descriptors(image, keypoints, results_dir_path, **kwargs):
 def match_features(kp1, fd1, kp2, fd2):
 
     matches = []
+    mapping = []
 
     for i, f1 in enumerate(fd1):
         _best_dist_1 = np.inf
@@ -152,11 +153,59 @@ def match_features(kp1, fd1, kp2, fd2):
             elif _dist < _best_dist_2:
                 _best_dist_2 = _dist
 
-            if _best_dist_1/_best_dist_2 < 0.2:
+            if _best_dist_1/_best_dist_2 < 0.7:
                 matches.append(cv2.DMatch(i, j, _dist))
+                mapping.append([kp1[i].pt[0], kp1[i].pt[1], kp2[j].pt[0], kp2[j].pt[1], i, j, _dist])
 
-    return matches
+    return matches, mapping
 
+def find_homography(pairs):
+
+    A = []
+    for pair in pairs:
+        x1, y1, x2, y2, _, _, _ = pair
+        A.append([x1, y1, 1, 0, 0, 0, -x2*x1, -x2*y1, -x2])
+        A.append([0, 0, 0, x1, y1, 1, -y2*x1, -y2*y1, -y2])
+
+    A = np.array(A)
+
+    U, S, V = np.linalg.svd(A) # Single value decomposition
+    H = np.reshape(V[-1], (3, 3))
+    H = (1 / H.item(8)) * H
+
+    return H
+
+def ransac(mapping, tau, n_max=1000):
+
+    inliers = []
+    inlier_matches = []
+    for i in range(n_max):
+        pairs = [mapping[i] for i in np.random.choice(len(mapping), 4)]
+        H = find_homography(pairs)
+
+        for pair in mapping:
+            x1, y1, x2, y2, i, j, _dist = pair
+            temp_inliers = []
+            temp_matches = []
+            _H = H.flatten().tolist()
+            x2_hat = _H[0]*x1 + _H[1]*y1 + _H[2]
+            y2_hat = _H[3]*x1 + _H[4]*y1 + _H[5]
+            z2_hat = _H[6]*x1 + _H[7]*y1 + _H[8]
+
+            if abs(x2_hat/(z2_hat+1e-6) - x2) + abs(y2_hat/(z2_hat+1e-6) - y2) < tau:
+                temp_inliers.append([x1, y1, x2, y2, i, j, _dist])
+                temp_matches.append(cv2.DMatch(i, j, _dist))
+
+        if len(temp_inliers) > len(inliers):
+            inliers = temp_inliers
+            inlier_matches = temp_matches
+
+        if len(inliers) >= 0.9*len(mapping):
+            break
+
+    H_hat = find_homography(inliers)
+
+    return H_hat, inliers, inlier_matches
 
 def main():
     # Add any Command Line arguments here
@@ -217,13 +266,18 @@ def main():
 	Feature Matching
 	Save Feature Matching output as matching.png
 	"""
-    matches = match_features(keypoints[0], feature_descriptors[0], keypoints[1], feature_descriptors[1])
+    # [(a, b) for idx, a in enumerate(test_list) for b in test_list[idx + 1:]]
+
+    matches, mapping = match_features(keypoints[0], feature_descriptors[0], keypoints[1], feature_descriptors[1])
     _matched_img = cv2.drawMatches(images[0][1], keypoints[0], images[1][1], keypoints[1], matches, None, matchColor=(0, 255, 0), flags=2)
     cv2.imwrite(osp.join(results_dir_path, "matching.png"), _matched_img)
 
     """
 	Refine: RANSAC, Estimate Homography
 	"""
+    H, inliers, inlier_matches = ransac(mapping, tau=700, n_max=1000)
+    _matched_img = cv2.drawMatches(images[0][1], keypoints[0], images[1][1], keypoints[1], inlier_matches, None, matchColor=(0, 255, 0), flags=2)
+    cv2.imwrite(osp.join(results_dir_path, "matching_inliers.png"), _matched_img)
 
     """
 	Image Warping + Blending
