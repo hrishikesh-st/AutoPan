@@ -110,13 +110,15 @@ def anms(c_img, image, results_dir_path, n_best=150, plot=True, min_distance=3, 
 
     best_corners_idx = np.argsort(_r)[::-1][:n_best]
     best_corners = coordinates[best_corners_idx]
+    keypoints = []
 
     _img = image[1].copy()
     for corner in best_corners:
+        keypoints.append(cv2.KeyPoint(float(corner[1]), float(corner[0]), 1))
         cv2.drawMarker(_img, (corner[1], corner[0]), (255, 0, 0), cv2.MARKER_TILTED_CROSS, 10, 1)
         cv2.imwrite(osp.join(results_dir_path, f"ANMS_{image_name}"), _img)
 
-    return best_corners
+    return keypoints
 
 def get_feature_descriptors(image, keypoints, results_dir_path, **kwargs):
 
@@ -126,7 +128,7 @@ def get_feature_descriptors(image, keypoints, results_dir_path, **kwargs):
     feature_descriptors = []
 
     for point in keypoints:
-        patch = _img[point[0]:point[0]+40, point[1]:point[1]+40, :].copy()
+        patch = _img[int(point.pt[1]):int(point.pt[1])+40, int(point.pt[0]):int(point.pt[0])+40, :].copy()
         blurred_patch = cv2.GaussianBlur(patch, (5, 5), 0)
         subsampled_patch = cv2.resize(blurred_patch, (8, 8))
         subsampled_vector = subsampled_patch.flatten()
@@ -134,6 +136,26 @@ def get_feature_descriptors(image, keypoints, results_dir_path, **kwargs):
         feature_descriptors.append(normalized_vector)
 
     return feature_descriptors
+
+def match_features(kp1, fd1, kp2, fd2):
+
+    matches = []
+
+    for i, f1 in enumerate(fd1):
+        _best_dist_1 = np.inf
+        _best_dist_2 = np.inf
+        for j, f2 in enumerate(fd2):
+            _dist = np.linalg.norm(f1-f2)
+            if _dist < _best_dist_1:
+                _best_dist_2 = _best_dist_1
+                _best_dist_1 = _dist
+            elif _dist < _best_dist_2:
+                _best_dist_2 = _dist
+
+            if _best_dist_1/_best_dist_2 < 0.2:
+                matches.append(cv2.DMatch(i, j, _dist))
+
+    return matches
 
 
 def main():
@@ -195,6 +217,9 @@ def main():
 	Feature Matching
 	Save Feature Matching output as matching.png
 	"""
+    matches = match_features(keypoints[0], feature_descriptors[0], keypoints[1], feature_descriptors[1])
+    _matched_img = cv2.drawMatches(images[0][1], keypoints[0], images[1][1], keypoints[1], matches, None, matchColor=(0, 255, 0), flags=2)
+    cv2.imwrite(osp.join(results_dir_path, "matching.png"), _matched_img)
 
     """
 	Refine: RANSAC, Estimate Homography
