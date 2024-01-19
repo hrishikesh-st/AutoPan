@@ -157,7 +157,7 @@ def match_features(kp1, fd1, kp2, fd2):
                 _best_dist_2 = _dist
 
         if _best_dist_1/_best_dist_2 < 0.75:
-            matches.append(cv2.DMatch(i, _idx, _dist))
+            matches.append(cv2.DMatch(i, _idx, _best_dist_1))
             mapping.append([kp1[i].pt[0], kp1[i].pt[1], kp2[_idx].pt[0], kp2[_idx].pt[1], i, _idx, _best_dist_1])
 
     return matches, mapping
@@ -174,7 +174,7 @@ def find_homography(pairs):
 
     U, S, V = np.linalg.svd(A) # Single value decomposition
     H = np.reshape(V[-1], (3, 3))
-    H = (1 / H.item(8)) * H
+    # H = (1 / H.item(8)) * H
 
     return H
 
@@ -209,6 +209,23 @@ def ransac(mapping, tau, n_max=1000):
     H_hat = find_homography(inliers)
 
     return H_hat, inliers, inlier_matches
+
+def warpTwoImages(img1, img2, H):
+    '''warp img2 to img1 with homograph H'''
+    h1,w1 = img1.shape[:2]
+    h2,w2 = img2.shape[:2]
+    pts1 = np.float32([[0,0],[0,h1],[w1,h1],[w1,0]]).reshape(-1,1,2)
+    pts2 = np.float32([[0,0],[0,h2],[w2,h2],[w2,0]]).reshape(-1,1,2)
+    pts2_ = cv2.perspectiveTransform(pts2, H)
+    pts = np.concatenate((pts1, pts2_), axis=0)
+    [xmin, ymin] = np.int32(pts.min(axis=0).ravel() - 0.5)
+    [xmax, ymax] = np.int32(pts.max(axis=0).ravel() + 0.5)
+    t = [-xmin,-ymin]
+    Ht = np.array([[1,0,t[0]],[0,1,t[1]],[0,0,1]]) # translate
+
+    result = cv2.warpPerspective(img2, Ht.dot(H), (xmax-xmin, ymax-ymin))
+    result[t[1]:h1+t[1],t[0]:w1+t[0]] = img1
+    return result
 
 def main():
     # Add any Command Line arguments here
@@ -286,6 +303,8 @@ def main():
 	Image Warping + Blending
 	Save Panorama output as mypano.png
 	"""
+    img = warpTwoImages(images[1][1], images[0][1], H)
+    cv2.imwrite(osp.join(results_dir_path, "mypano.png"), img)
 
 
 if __name__ == "__main__":
