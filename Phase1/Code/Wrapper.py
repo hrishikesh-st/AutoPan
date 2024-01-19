@@ -43,7 +43,7 @@ def detect_corners(image, save_path, image_name):
     corner_det_image = cv2.cornerHarris(image_gray, blockSize=7, ksize=11, k=0.04)
 
     _img = image.copy()
-    corners = np.argwhere(corner_det_image > 0.01 * corner_det_image.max())
+    corners = np.argwhere(corner_det_image > 0.0075 * corner_det_image.max())
 
     for y, x in corners:
         cv2.drawMarker(_img, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 10, 1)
@@ -54,7 +54,7 @@ def detect_corners(image, save_path, image_name):
     return corner_det_image
 
 
-def anms(c_img, image, save_path, image_name, n_best=150, min_distance=3, threshold=0.001):
+def anms(c_img, image, save_path, image_name, n_best=150, min_distance=3, threshold=0.0075):
 
     coordinates = peak_local_max(c_img, min_distance=min_distance, threshold_rel=threshold)
 
