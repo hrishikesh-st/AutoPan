@@ -23,6 +23,10 @@ import argparse
 from skimage.feature import peak_local_max
 from natsort import natsorted
 
+def scale_image(image):
+    # Sclaing the image to -1 to 1
+    image = image / np.max(np.abs(image))
+    return image.astype(np.float32)
 
 def read_images(data_dir, set, train=True):
 
@@ -41,12 +45,13 @@ def detect_corners(image, save_path, image_name):
     # Apply Harris Corner Detection
     image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     corner_det_image = cv2.cornerHarris(image_gray, blockSize=7, ksize=11, k=0.04)
+    corner_det_image = scale_image(corner_det_image)
 
     _img = image.copy()
     corners = np.argwhere(corner_det_image > 0.0075 * corner_det_image.max())
 
     for y, x in corners:
-        cv2.drawMarker(_img, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 10, 1)
+        cv2.drawMarker(_img, (x, y), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15   , 2)
 
     # Save the corner detection output
     cv2.imwrite(os.path.join(save_path, "corners_harris_"+image_name+".png"), _img)
@@ -55,14 +60,26 @@ def detect_corners(image, save_path, image_name):
 
 
 def anms(c_img, image, save_path, image_name, n_best=150, min_distance=3, threshold=0.0075):
+    """
+    TODO: Check logic of the code. Especially effect of line 80.
+    Comparing each corner with every other corner is giving "visually" correct results.
+    The current implementation compares each corner with itself and all the corners preceding it.
+    """
 
     coordinates = peak_local_max(c_img, min_distance=min_distance, threshold_rel=threshold)
+
+    _img_local_maxima = image.copy()
+    # Plot the peak local maximas
+    for y, x in coordinates:
+        cv2.drawMarker(_img_local_maxima, (x, y), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15, 2)
+    cv2.imwrite(os.path.join(save_path, "anms_local_maxima_"+image_name+".png"), _img_local_maxima) 
+
 
     _r = np.ones(len(coordinates)) * np.inf
     _ED = None
 
     for i in range(len(coordinates)):
-        for j in range(i+1, len(coordinates)):
+        for j in range(i, len(coordinates)):
             if(c_img[coordinates[i][0], coordinates[i][1]] < c_img[coordinates[j][0], coordinates[j][1]]):
                 _ED = (coordinates[i][0] - coordinates[j][0])**2 + (coordinates[i][1] - coordinates[j][1])**2
 
@@ -76,8 +93,8 @@ def anms(c_img, image, save_path, image_name, n_best=150, min_distance=3, thresh
     _img = image.copy()
     for corner in best_corners:
         keypoints.append(cv2.KeyPoint(float(corner[1]), float(corner[0]), 1))
-        cv2.drawMarker(_img, (corner[1], corner[0]), (255, 0, 0), cv2.MARKER_TILTED_CROSS, 10, 1)
-        cv2.imwrite(os.path.join(save_path, "ANMS_"+image_name+".png"), _img)
+        cv2.drawMarker(_img, (corner[1], corner[0]), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15, 2)
+    cv2.imwrite(os.path.join(save_path, "ANMS_"+image_name+".png"), _img)
 
     return keypoints
 
@@ -171,7 +188,7 @@ def ransac(mapping, tau, n_max=1000):
 
     return H_hat, inliers, inlier_matches
 
-def warp_two_images(image1, image2, H):
+def warp_two_images(image1, image2, H, save_path, alpha=0.86):
 
     h1, w1 = image1.shape[:2]
     h2, w2 = image2.shape[:2]
@@ -182,11 +199,37 @@ def warp_two_images(image1, image2, H):
 
     [xmin, ymin] = np.int32(p.min(axis=0).ravel() - 0.5)
     [xmax, ymax] = np.int32(p.max(axis=0).ravel() + 0.5)
+
+    print(f"xmin: {xmin}, ymin: {ymin}, xmax: {xmax}, ymax: {ymax}")
+
     t = [-xmin, -ymin]
     Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])  # translate
 
     result = cv2.warpPerspective(image2, Ht.dot(H), (xmax-xmin, ymax-ymin))
-    result[t[1]:h1 + t[1], t[0]:w1 + t[0]] = image1
+    # Drawing a marker to visualise the translation
+    # Stitched image may conatain a red cross marker.
+    cv2.drawMarker(result, (int(t[0]), int(t[1])), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 15, 2)
+    cv2.imwrite(os.path.join(save_path, "result.png"), result)
+
+    # Current implementation of overlaying the images
+    """ result[t[1]:h1 + t[1], t[0]:w1 + t[0]] = image1 """
+
+
+    """
+    Very basic implementation of alpha blending.
+    The blended image still has visible artifacts.
+    TODO: 1. Try weighted alpha blending.
+          2. Poissons' blending.
+    """
+    # Alpha blending
+    for y in range(h1):
+        for x in range(w1):
+            # Calculate the position in the result image
+            result_y = y + t[1]
+            result_x = x + t[0]
+
+            # Blend the pixel values
+            result[result_y, result_x] = alpha * image1[y, x] + (1 - alpha) * result[result_y, result_x]
 
     return result
 
@@ -241,7 +284,7 @@ def main():
             Save ANMS output as anms.png
             """
             print("ANMS..."+str(i))
-            keypoints_ = anms(c_img, img, save_path, str(i), min_distance=9)
+            keypoints_ = anms(c_img, img, save_path, str(i), min_distance=3)
             keypoints.append(keypoints_)
 
             """
@@ -267,7 +310,7 @@ def main():
         Refine: RANSAC, Estimate Homography
         """
         print("RANSAC..."+str(_iter))
-        H, inliers, inlier_matches = ransac(mapping, tau=50, n_max=2000)
+        H, inliers, inlier_matches = ransac(mapping, tau=50, n_max=1000)
         _matched_img = cv2.drawMatches(pair[0], keypoints[0], pair[1], keypoints[1], inlier_matches, None, matchColor=(0, 255, 0), flags=2)
         cv2.imwrite(os.path.join(save_path, "matching_inliers.png"), _matched_img)
 
@@ -276,7 +319,7 @@ def main():
         Save Panorama output as mypano.png
         """
         print("Warping..."+str(_iter))
-        result = warp_two_images(pair[1], pair[0], H)
+        result = warp_two_images(pair[1], pair[0], H, save_path)
         cv2.imwrite(os.path.join(save_path, "mypano.png"), result)
 
         _idx += 1
