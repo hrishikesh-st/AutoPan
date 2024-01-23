@@ -43,9 +43,7 @@ class Logger:
         self.log_file.write('Logs date and time: '+time.strftime("%d-%m-%Y %H:%M:%S")+'\n\n')
 
         self.train_loss = []
-        self.train_acc = []
-        self.test_loss = []
-        self.test_acc = []
+        self.val_loss = []
 
     def log(self, tag, **kwargs):
         """ Log the data
@@ -66,31 +64,21 @@ class Logger:
 
         elif tag == 'train':
             self.train_loss.append([kwargs['loss']])
-            self.train_acc.append([kwargs['acc']])
-            self.log_file.write(f'Epoch: {kwargs["epoch"]} \t Train Loss: {kwargs["loss"]} \t Train Acc: {kwargs["acc"]} \t Avg Time: {kwargs["time"]} secs\n')
+            self.log_file.write(f'Epoch: {kwargs["epoch"]} \t Train Loss: {kwargs["loss"]} \t Avg Time: {kwargs["time"]} secs\n')
 
-        elif tag == 'test':
-            self.test_loss.append([kwargs['loss']])
-            self.test_acc.append([kwargs['acc']])
-            self.log_file.write(f'Epoch: {kwargs["epoch"]} \t Test Loss: {kwargs["loss"]} \t Test Acc: {kwargs["acc"]} \t Avg Time: {kwargs["time"]} secs\n')
+        elif tag == 'val':
+            self.val_loss.append([kwargs['loss']])
+            self.log_file.write(f'Epoch: {kwargs["epoch"]} \t Val Loss: {kwargs["loss"]} \t Avg Time: {kwargs["time"]} secs\n')
 
-        elif tag == 'model_loss':
+        elif tag == 'model':
             self.log_file.write('#########################################################\n')
-            self.log_file.write(f'Saving best model... Test Loss: {kwargs["loss"]}\n')
-            self.log_file.write('#########################################################\n')
-
-        elif tag == 'model_acc':
-            self.log_file.write('#########################################################\n')
-            self.log_file.write(f'Saving best model... Test Accuracy: {kwargs["acc"]}\n')
+            self.log_file.write(f'Saving best model... Val Loss: {kwargs["loss"]}\n')
             self.log_file.write('#########################################################\n')
 
         elif tag == 'plot':
             self.plot(self.train_loss, name='Train Loss', path=self.plot_dir)
-            self.plot(self.train_acc, name='Train Accuracy', path=self.plot_dir)
-            self.plot(self.test_loss, name='Test Loss', path=self.plot_dir)
-            self.plot(self.test_acc, name='Test Accuracy', path=self.plot_dir)
+            self.plot(self.val_loss, name='Val Loss', path=self.plot_dir)
             self.plot_both(self.train_loss, self.test_loss, name='Loss', path=self.plot_dir)
-            self.plot_both(self.train_acc, self.test_acc, name='Accuracy', path=self.plot_dir)
 
         self.log_file.close()
 
@@ -131,7 +119,7 @@ class Logger:
         """
 
         plt.plot(data1, label='Train')
-        plt.plot(data2, label='Test')
+        plt.plot(data2, label='Val')
         plt.xlabel('Epochs')
         plt.ylabel(name)
         plt.title(name+' vs. Epochs')

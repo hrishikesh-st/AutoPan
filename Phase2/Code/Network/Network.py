@@ -15,13 +15,16 @@ import sys
 import torch
 import numpy as np
 import torch.nn.functional as F
-import kornia  # You can use this to get the transform and warp in this project
+# import kornia  # You can use this to get the transform and warp in this project
 
 # Don't generate pyc codes
 sys.dont_write_bytecode = True
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+LOSS = nn.MSELoss().to(DEVICE)
 
-def LossFn(delta, img_a, patch_b, corners):
+
+def LossFn(out, labels):
     ###############################################
     # Fill your loss function of choice here!
     ###############################################
@@ -30,25 +33,25 @@ def LossFn(delta, img_a, patch_b, corners):
     # You can use kornia to get the transform and warp in this project
     # Bonus if you implement it yourself
     ###############################################
-    loss = ...
+    loss = LOSS(out, labels)
     return loss
 
 
-class HomographyModel(pl.LightningModule):
-    def __init__(self, hparams):
+class HomographyModel(nn.Module):
+    def __init__(self, ModelType):
         super(HomographyModel, self).__init__()
-        self.hparams = hparams
-        self.model = Net()
+        if ModelType == 'Sup':
+            self.model = SupervisedNet()
 
     def forward(self, a, b):
         return self.model(a, b)
 
     def training_step(self, batch, batch_idx):
-        img_a, patch_a, patch_b, corners, gt = batch
-        delta = self.model(patch_a, patch_b)
-        loss = LossFn(delta, img_a, patch_b, corners)
-        logs = {"loss": loss}
-        return {"loss": loss, "log": logs}
+        stacked_patches, labels = batch
+        out = self.model(stacked_patches)
+        loss = LossFn(out, labels)
+        # logs = {"loss": loss}
+        return loss
 
     def validation_step(self, batch, batch_idx):
         img_a, patch_a, patch_b, corners, gt = batch
@@ -62,7 +65,7 @@ class HomographyModel(pl.LightningModule):
         return {"avg_val_loss": avg_loss, "log": logs}
 
 
-class Net(nn.Module):
+class SupervisedNet(nn.Module):
     def __init__(self, InputSize, OutputSize):
         """
         Inputs:
@@ -73,6 +76,46 @@ class Net(nn.Module):
         #############################
         # Fill your network initialization of choice here!
         #############################
+        self.block_1 = nn.Sequential(
+            nn.Conv2d(2, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+        )
+        self.block_2 = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+        )
+        self.block_3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+        )
+        self.block_4 = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+        )
+        self.dropout = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(16 * 16 * 128, 1024)
+        self.fc2 = nn.Linear(1024, 8)
+
         ...
         #############################
         # You will need to change the input size and output
@@ -115,7 +158,7 @@ class Net(nn.Module):
 
         return x
 
-    def forward(self, xa, xb):
+    def forward(self, stacked_image):
         """
         Input:
         xa is a MiniBatch of the image a
@@ -126,4 +169,14 @@ class Net(nn.Module):
         #############################
         # Fill your network structure of choice here!
         #############################
+
+        out = self.block_1(stacked_image)
+        out = self.block_2(out)
+        out = self.block_3(out)
+        out = self.block_4(out)
+        out = out.view(out.size(0), -1)
+        out = self.dropout(out)
+        out = self.fc1(out)
+        out = self.fc2(out)
+
         return out

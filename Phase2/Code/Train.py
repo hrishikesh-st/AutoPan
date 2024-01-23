@@ -22,7 +22,7 @@ import torch
 import torchvision
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
-from torch.optim import AdamW
+from torch.optim import AdamW, lr_scheduler
 from Network.Network import HomographyModel
 import cv2
 import sys
@@ -40,6 +40,7 @@ import numpy as np
 import time
 from Misc.MiscUtils import *
 from Misc.DataUtils import *
+from Misc.LogUtils import Logger
 from torchvision.transforms import ToTensor
 import argparse
 import shutil
@@ -47,9 +48,12 @@ import string
 from termcolor import colored, cprint
 import math as m
 from tqdm import tqdm
+import json
+from natsort import natsorted
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def GenerateBatch(BasePath, DirNamesTrain, TrainCoordinates, ImageSize, MiniBatchSize):
+def GenerateBatch(DatasetPath, ImageNames, MiniBatchSize, train=True):
     """
     Inputs:
     BasePath - Path to COCO folder without "/" at the end
@@ -63,28 +67,38 @@ def GenerateBatch(BasePath, DirNamesTrain, TrainCoordinates, ImageSize, MiniBatc
     I1Batch - Batch of images
     CoordinatesBatch - Batch of coordinates
     """
-    I1Batch = []
-    CoordinatesBatch = []
+    images_batch = []
+    H4pt_batch = []
+
+    if train:
+        BasePath = os.path.join(DatasetPath, 'Train')
+    else:
+        BasePath = os.path.join(DatasetPath, 'Val')
+
+    pa_path = os.path.join(BasePath, 'P_A')
+    pb_path = os.path.join(BasePath, 'P_B')
+    labels_path = os.path.join(BasePath, 'labels')
 
     ImageNum = 0
     while ImageNum < MiniBatchSize:
         # Generate random image
-        RandIdx = random.randint(0, len(DirNamesTrain) - 1)
+        RandIdx = random.randint(0, len(ImageNames) - 1)
 
-        RandImageName = BasePath + os.sep + DirNamesTrain[RandIdx] + ".jpg"
+        RandImageName = ImageNames[RandIdx]
         ImageNum += 1
 
-        ##########################################################
-        # Add any standardization or data augmentation here!
-        ##########################################################
-        I1 = np.float32(cv2.imread(RandImageName))
-        Coordinates = TrainCoordinates[RandIdx]
+        P_A = cv2.imread(os.path.join(pa_path, RandImageName))
+        P_B = cv2.imread(os.path.join(pb_path, RandImageName))
+        label = json.load(open(os.path.join(labels_path, RandImageName[:-4]+'.txt')))
+
+        stacked_image = np.float32(np.concatenate([P_A, P_B], axis=0))
+        H4pt = label['H4pt']
 
         # Append All Images and Mask
-        I1Batch.append(torch.from_numpy(I1))
-        CoordinatesBatch.append(torch.tensor(Coordinates))
+        images_batch.append(torch.from_numpy(stacked_image).to(DEVICE))
+        H4pt_batch.append(torch.tensor(H4pt).to(DEVICE))
 
-    return torch.stack(I1Batch), torch.stack(CoordinatesBatch)
+    return torch.stack(images_batch), torch.stack(H4pt_batch)
 
 
 def PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile):
@@ -99,21 +113,9 @@ def PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile)
         print("Loading latest checkpoint with the name " + LatestFile)
 
 
-def TrainOperation(
-    DirNamesTrain,
-    TrainCoordinates,
-    NumTrainSamples,
-    ImageSize,
-    NumEpochs,
-    MiniBatchSize,
-    SaveCheckPoint,
-    CheckPointPath,
-    DivTrain,
-    LatestFile,
-    BasePath,
-    LogsPath,
-    ModelType,
-):
+def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatchSize,
+                   CheckPointPath, LatestFile, LogsPath, ModelType,
+                   LR, WD, GradientClip):
     """
     Inputs:
     ImgPH is the Input Image placeholder
@@ -134,16 +136,17 @@ def TrainOperation(
     Saves Trained network in CheckPointPath and Logs to LogsPath
     """
     # Predict output with forward pass
-    model = HomographyModel()
+    model = HomographyModel(ModelType=ModelType).to(DEVICE)
 
     ###############################################
     # Fill your optimizer of choice here!
     ###############################################
-    Optimizer = ...
+    Optimizer = AdamW(model.parameters(), lr=LR, weight_decay=WD)
+    scheduler = lr_scheduler.ExponentialLR(Optimizer, gamma=0.9)
 
-    # Tensorboard
-    # Create a summary to monitor loss tensor
-    Writer = SummaryWriter(LogsPath)
+    # # Tensorboard
+    # # Create a summary to monitor loss tensor
+    # Writer = SummaryWriter(LogsPath)
 
     if LatestFile is not None:
         CheckPoint = torch.load(CheckPointPath + LatestFile + ".ckpt")
@@ -155,65 +158,87 @@ def TrainOperation(
         StartEpoch = 0
         print("New model initialized....")
 
+    _best_loss = 1e6
+    NumTrainSamples = len(DirNamesTrain)
+    NumValSamples = len(DirNamesVal)
+
     for Epochs in tqdm(range(StartEpoch, NumEpochs)):
-        NumIterationsPerEpoch = int(NumTrainSamples / MiniBatchSize / DivTrain)
+        NumIterationsPerEpoch = int(NumTrainSamples / MiniBatchSize)
+        _train_loss = 0.0
+        start = time.time()
         for PerEpochCounter in tqdm(range(NumIterationsPerEpoch)):
-            I1Batch, CoordinatesBatch = GenerateBatch(
-                BasePath, DirNamesTrain, TrainCoordinates, ImageSize, MiniBatchSize
-            )
+            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesTrain, MiniBatchSize, train=True)
 
             # Predict output with forward pass
-            PredicatedCoordinatesBatch = model(I1Batch)
-            LossThisBatch = LossFn(PredicatedCoordinatesBatch, CoordinatesBatch)
+            # PredicatedCoordinatesBatch = model(I1Batch)
+            # LossThisBatch = LossFn(PredicatedCoordinatesBatch, CoordinatesBatch)
+            LossThisBatch = model.training_step(I1Batch, CoordinatesBatch)
 
             Optimizer.zero_grad()
             LossThisBatch.backward()
             Optimizer.step()
 
-            # Save checkpoint every some SaveCheckPoint's iterations
-            if PerEpochCounter % SaveCheckPoint == 0:
-                # Save the Model learnt in this epoch
-                SaveName = (
-                    CheckPointPath
-                    + str(Epochs)
-                    + "a"
-                    + str(PerEpochCounter)
-                    + "model.ckpt"
-                )
+            if GradientClip:
+                torch.nn.utils.clip_grad_value_(model.parameters(), GradientClip)
 
-                torch.save(
-                    {
-                        "epoch": Epochs,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": Optimizer.state_dict(),
-                        "loss": LossThisBatch,
-                    },
-                    SaveName,
-                )
+            _train_loss += LossThisBatch.detach().cpu().numpy()
+
+            # Save checkpoint every some SaveCheckPoint's iterations
+            # if PerEpochCounter % SaveCheckPoint == 0:
+            if PerEpochCounter % 200 == 0:
+                # Save the Model learnt in this epoch
+                SaveName = (CheckPointPath+str(Epochs)+"a"+str(PerEpochCounter)+"model.ckpt")
+
+                torch.save({"epoch": Epochs, "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": Optimizer.state_dict(), "loss": LossThisBatch}, SaveName)
                 print("\n" + SaveName + " Model Saved...")
 
-            result = model.validation_step(Batch)
-            # Tensorboard
-            Writer.add_scalar(
-                "LossEveryIter",
-                result["val_loss"],
-                Epochs * NumIterationsPerEpoch + PerEpochCounter,
-            )
-            # If you don't flush the tensorboard doesn't update until a lot of iterations!
-            Writer.flush()
+            # # Tensorboard
+            # Writer.add_scalar(
+            #     "LossEveryIter",
+            #     result["val_loss"],
+            #     Epochs * NumIterationsPerEpoch + PerEpochCounter,
+            # )
+            # # If you don't flush the tensorboard doesn't update until a lot of iterations!
+            # Writer.flush()
+
+        _train_loss /= PerEpochCounter
+        logger.log(tag='train', epoch=Epochs, loss=_train_loss, time=time.time()-start)
+
+        _val_loss = 0.0
+        start = time.time()
+        NumIterationsPerEpoch = int(NumValSamples/MiniBatchSize)
+        for PerEpochCounter in range(NumIterationsPerEpoch):
+            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesVal, MiniBatchSize, train=False)
+            _val_loss += model.validation_step(I1Batch, CoordinatesBatch)
+
+        _val_loss /= PerEpochCounter
+
+        if _val_loss < _best_loss:
+            _best_loss = _val_loss
+            SaveName = LogsPath + '/model/best_model.pt'
+            # torch.save({'epoch': Epochs,'model_state_dict': model.state_dict(),'optimizer_state_dict': Optimizer.state_dict(),'test_loss': _test_loss}, SaveName)
+            torch.save(model.state_dict(), SaveName)
+            print('\n' + SaveName + ' Model Saved...')
+            logger.log(tag='model', loss=_val_loss)
+
+        if Epochs % 5 == 0:
+            SaveName = LogsPath + '/model/model'+str(Epochs)+'.pt'
+            # torch.save({'epoch': Epochs,'model_state_dict': model.state_dict(),'optimizer_state_dict': Optimizer.state_dict(),'test_loss': _test_loss}, SaveName)
+            torch.save(model.state_dict(), SaveName)
+            print('\n' + SaveName + ' Model Saved...')
+
+        logger.log(tag='val', epoch=Epochs, loss=_val_loss, time=time.time()-start)
+
+        scheduler.step()
 
         # Save model every epoch
         SaveName = CheckPointPath + str(Epochs) + "model.ckpt"
-        torch.save(
-            {
-                "epoch": Epochs,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": Optimizer.state_dict(),
-                "loss": LossThisBatch,
-            },
-            SaveName,
-        )
+        torch.save({"epoch": Epochs, "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": Optimizer.state_dict(), "loss": LossThisBatch}, SaveName)
         print("\n" + SaveName + " Model Saved...")
+
+        logger.log(tag='plot')
 
 
 def main():
@@ -225,71 +250,48 @@ def main():
     #"""
     # Parse Command Line arguments
     Parser = argparse.ArgumentParser()
-    Parser.add_argument(
-        "--BasePath",
-        default="/home/lening/workspace/rbe549/YourDirectoryID_p1/Phase2/Data",
-        help="Base path of images, Default:/home/lening/workspace/rbe549/YourDirectoryID_p1/Phase2/Data",
-    )
-    Parser.add_argument(
-        "--CheckPointPath",
-        default="../Checkpoints/",
-        help="Path to save Checkpoints, Default: ../Checkpoints/",
-    )
-
-    Parser.add_argument(
-        "--ModelType",
-        default="Unsup",
-        help="Model type, Supervised or Unsupervised? Choose from Sup and Unsup, Default:Unsup",
-    )
-    Parser.add_argument(
-        "--NumEpochs",
-        type=int,
-        default=50,
-        help="Number of Epochs to Train for, Default:50",
-    )
-    Parser.add_argument(
-        "--DivTrain",
-        type=int,
-        default=1,
-        help="Factor to reduce Train data by per epoch, Default:1",
-    )
-    Parser.add_argument(
-        "--MiniBatchSize",
-        type=int,
-        default=1,
-        help="Size of the MiniBatch to use, Default:1",
-    )
-    Parser.add_argument(
-        "--LoadCheckPoint",
-        type=int,
-        default=0,
-        help="Load Model from latest Checkpoint from CheckPointsPath?, Default:0",
-    )
-    Parser.add_argument(
-        "--LogsPath",
-        default="Logs/",
-        help="Path to save Logs for Tensorboard, Default=Logs/",
-    )
+    Parser.add_argument("--DatasetPath", default="",help="Base path of images, Default:")
+    Parser.add_argument("--CheckPointPath", default="../Checkpoints/", help="Path to save Checkpoints, Default: ../Checkpoints/")
+    Parser.add_argument("--ModelType", default="Unsup", help="Model type, Supervised or Unsupervised? Choose from Sup and Unsup, Default:Unsup")
+    Parser.add_argument("--NumEpochs", type=int, default=50, help="Number of Epochs to Train for, Default:50")
+    Parser.add_argument("--DivTrain", type=int, default=1, help="Factor to reduce Train data by per epoch, Default:1")
+    Parser.add_argument("--MiniBatchSize", type=int, default=1, help="Size of the MiniBatch to use, Default:1")
+    Parser.add_argument("--LoadCheckPoint", type=int, default=0, help="Load Model from latest Checkpoint from CheckPointsPath?, Default:0")
+    Parser.add_argument("--LogsPath", default="Logs/", help="Path to save Logs for Tensorboard, Default=Logs/")
+    Parser.add_argument('--LogDir', type=str, default='test_logs/', help='name of the log file')
+    Parser.add_argument("--LR", type=float, default=0.001, help="Learning Rate")
+    Parser.add_argument("--WD", type=float, default=0.0001, help="Weight Decay")
+    Parser.add_argument("--GradientClip", type=float, default=0.1, help="Gradient Clipping")
+    Parser.add_argument("--Msg", type=str, default="", help="message")
 
     Args = Parser.parse_args()
     NumEpochs = Args.NumEpochs
-    BasePath = Args.BasePath
+    DatasetPath = Args.DatasetPath
     DivTrain = float(Args.DivTrain)
     MiniBatchSize = Args.MiniBatchSize
     LoadCheckPoint = Args.LoadCheckPoint
     CheckPointPath = Args.CheckPointPath
     LogsPath = Args.LogsPath
+    LogDir = Args.LogDir
     ModelType = Args.ModelType
+    LR = Args.LR
+    WD = Args.WD
+    GradientClip = Args.GradientClip
+    Msg = Args.Msg
+
+    global logger
+    logger = Logger(os.path.join(LogsPath, LogDir))
+
+    logger.log(tag='args', num_epochs=NumEpochs, mini_batch_size=MiniBatchSize,
+               lr=LR, weight_decay=WD, gradient_clip=GradientClip, msg=Msg)
 
     # Setup all needed parameters including file reading
-    (
-        DirNamesTrain,
-        SaveCheckPoint,
-        ImageSize,
-        NumTrainSamples,
-        TrainCoordinates,
-        NumClasses,
-    ) = SetupAll(BasePath, CheckPointPath)
+    # (DirNamesTrain, SaveCheckPoint, ImageSize, NumTrainSamples, TrainCoordinates, NumClasses) = SetupAll(BasePath, CheckPointPath)
+
+    train_path = os.path.join(DatasetPath, 'Train')
+    val_path = os.path.join(DatasetPath, 'Val')
+    DirNamesTrain = natsorted(os.listdir(os.path.join(train_path, 'P_A')))
+    DirNamesVal = natsorted(os.listdir(os.path.join(val_path, 'P_A')))
 
     # Find Latest Checkpoint File
     if LoadCheckPoint == 1:
@@ -298,23 +300,11 @@ def main():
         LatestFile = None
 
     # Pretty print stats
-    PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile)
+    # PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile)
 
-    TrainOperation(
-        DirNamesTrain,
-        TrainCoordinates,
-        NumTrainSamples,
-        ImageSize,
-        NumEpochs,
-        MiniBatchSize,
-        SaveCheckPoint,
-        CheckPointPath,
-        DivTrain,
-        LatestFile,
-        BasePath,
-        LogsPath,
-        ModelType,
-    )
+    TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatchSize,
+                   CheckPointPath, LatestFile, LogsPath, ModelType,
+                   LR, WD, GradientClip)
 
 
 if __name__ == "__main__":
