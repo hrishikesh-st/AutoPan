@@ -23,6 +23,9 @@ sys.dont_write_bytecode = True
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 LOSS = nn.MSELoss().to(DEVICE)
 
+torch.manual_seed(42)
+np.random.seed(42)
+
 
 def LossFn(out, labels):
     ###############################################
@@ -46,18 +49,15 @@ class HomographyModel(nn.Module):
     def forward(self, a, b):
         return self.model(a, b)
 
-    def training_step(self, batch, batch_idx):
-        stacked_patches, labels = batch
+    def training_step(self, stacked_patches, labels):
         out = self.model(stacked_patches)
-        loss = LossFn(out, labels)
-        # logs = {"loss": loss}
+        loss = LossFn(out, labels.float())
         return loss
 
-    def validation_step(self, batch, batch_idx):
-        img_a, patch_a, patch_b, corners, gt = batch
-        delta = self.model(patch_a, patch_b)
-        loss = LossFn(delta, img_a, patch_b, corners)
-        return {"val_loss": loss}
+    def validation_step(self, stacked_patches, labels):
+        out = self.model(stacked_patches)
+        loss = LossFn(out, labels)
+        return loss.detach().cpu().numpy()
 
     def validation_epoch_end(self, outputs):
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
@@ -66,7 +66,7 @@ class HomographyModel(nn.Module):
 
 
 class SupervisedNet(nn.Module):
-    def __init__(self, InputSize, OutputSize):
+    def __init__(self):
         """
         Inputs:
         InputSize - Size of the Input
@@ -77,7 +77,7 @@ class SupervisedNet(nn.Module):
         # Fill your network initialization of choice here!
         #############################
         self.block_1 = nn.Sequential(
-            nn.Conv2d(2, 64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(6, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
@@ -113,7 +113,7 @@ class SupervisedNet(nn.Module):
             nn.MaxPool2d(2, 2),
         )
         self.dropout = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(16 * 16 * 128, 1024)
+        self.fc1 = nn.Linear(8192, 1024)
         self.fc2 = nn.Linear(1024, 8)
 
         ...
@@ -158,7 +158,7 @@ class SupervisedNet(nn.Module):
 
         return x
 
-    def forward(self, stacked_image):
+    def forward(self, stacked_patches):
         """
         Input:
         xa is a MiniBatch of the image a
@@ -170,7 +170,7 @@ class SupervisedNet(nn.Module):
         # Fill your network structure of choice here!
         #############################
 
-        out = self.block_1(stacked_image)
+        out = self.block_1(stacked_patches)
         out = self.block_2(out)
         out = self.block_3(out)
         out = self.block_4(out)

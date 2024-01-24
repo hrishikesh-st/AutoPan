@@ -53,6 +53,9 @@ from natsort import natsorted
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+torch.manual_seed(42)
+np.random.seed(42)
+
 def GenerateBatch(DatasetPath, ImageNames, MiniBatchSize, train=True):
     """
     Inputs:
@@ -91,11 +94,11 @@ def GenerateBatch(DatasetPath, ImageNames, MiniBatchSize, train=True):
         P_B = cv2.imread(os.path.join(pb_path, RandImageName))
         label = json.load(open(os.path.join(labels_path, RandImageName[:-4]+'.txt')))
 
-        stacked_image = np.float32(np.concatenate([P_A, P_B], axis=0))
+        stacked_image = np.float32(np.concatenate([P_A, P_B], axis=2))
         H4pt = label['H4pt']
 
         # Append All Images and Mask
-        images_batch.append(torch.from_numpy(stacked_image).to(DEVICE))
+        images_batch.append(torch.from_numpy(stacked_image).permute(2, 0, 1).to(DEVICE))
         H4pt_batch.append(torch.tensor(H4pt).to(DEVICE))
 
     return torch.stack(images_batch), torch.stack(H4pt_batch)
@@ -114,7 +117,7 @@ def PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile)
 
 
 def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatchSize,
-                   CheckPointPath, LatestFile, LogsPath, ModelType,
+                   CheckPointPath, LatestFile, LogsPath, LogDir, ModelType,
                    LR, WD, GradientClip):
     """
     Inputs:
@@ -161,13 +164,15 @@ def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatch
     _best_loss = 1e6
     NumTrainSamples = len(DirNamesTrain)
     NumValSamples = len(DirNamesVal)
+    train_batchsize = MiniBatchSize
+    val_batchsize = 128 # TODO: remove hardcoding
 
     for Epochs in tqdm(range(StartEpoch, NumEpochs)):
-        NumIterationsPerEpoch = int(NumTrainSamples / MiniBatchSize)
+        NumIterationsPerEpoch = int(NumTrainSamples / train_batchsize)
         _train_loss = 0.0
         start = time.time()
         for PerEpochCounter in tqdm(range(NumIterationsPerEpoch)):
-            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesTrain, MiniBatchSize, train=True)
+            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesTrain, train_batchsize, train=True)
 
             # Predict output with forward pass
             # PredicatedCoordinatesBatch = model(I1Batch)
@@ -185,13 +190,13 @@ def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatch
 
             # Save checkpoint every some SaveCheckPoint's iterations
             # if PerEpochCounter % SaveCheckPoint == 0:
-            if PerEpochCounter % 200 == 0:
-                # Save the Model learnt in this epoch
-                SaveName = (CheckPointPath+str(Epochs)+"a"+str(PerEpochCounter)+"model.ckpt")
+            # if PerEpochCounter % 200 == 0:
+            #     # Save the Model learnt in this epoch
+            #     SaveName = (CheckPointPath+str(Epochs)+"a"+str(PerEpochCounter)+"model.ckpt")
 
-                torch.save({"epoch": Epochs, "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": Optimizer.state_dict(), "loss": LossThisBatch}, SaveName)
-                print("\n" + SaveName + " Model Saved...")
+            #     torch.save({"epoch": Epochs, "model_state_dict": model.state_dict(),
+            #                 "optimizer_state_dict": Optimizer.state_dict(), "loss": LossThisBatch}, SaveName)
+            #     print("\n" + SaveName + " Model Saved...")
 
             # # Tensorboard
             # Writer.add_scalar(
@@ -202,28 +207,28 @@ def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatch
             # # If you don't flush the tensorboard doesn't update until a lot of iterations!
             # Writer.flush()
 
-        _train_loss /= PerEpochCounter
+        _train_loss /= PerEpochCounter+1
         logger.log(tag='train', epoch=Epochs, loss=_train_loss, time=time.time()-start)
 
         _val_loss = 0.0
         start = time.time()
-        NumIterationsPerEpoch = int(NumValSamples/MiniBatchSize)
-        for PerEpochCounter in range(NumIterationsPerEpoch):
-            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesVal, MiniBatchSize, train=False)
+        NumIterationsPerEpoch = int(NumValSamples/val_batchsize)
+        for PerEpochCounter in tqdm(range(NumIterationsPerEpoch)):
+            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesVal, val_batchsize, train=False)
             _val_loss += model.validation_step(I1Batch, CoordinatesBatch)
 
-        _val_loss /= PerEpochCounter
+        _val_loss /= PerEpochCounter+1
 
         if _val_loss < _best_loss:
             _best_loss = _val_loss
-            SaveName = LogsPath + '/model/best_model.pt'
+            SaveName = LogsPath + '/' + LogDir + '/' + 'model/best_model.pt'
             # torch.save({'epoch': Epochs,'model_state_dict': model.state_dict(),'optimizer_state_dict': Optimizer.state_dict(),'test_loss': _test_loss}, SaveName)
             torch.save(model.state_dict(), SaveName)
             print('\n' + SaveName + ' Model Saved...')
             logger.log(tag='model', loss=_val_loss)
 
         if Epochs % 5 == 0:
-            SaveName = LogsPath + '/model/model'+str(Epochs)+'.pt'
+            SaveName = LogsPath + '/' + LogDir + '/' + 'model/model'+str(Epochs)+'.pt'
             # torch.save({'epoch': Epochs,'model_state_dict': model.state_dict(),'optimizer_state_dict': Optimizer.state_dict(),'test_loss': _test_loss}, SaveName)
             torch.save(model.state_dict(), SaveName)
             print('\n' + SaveName + ' Model Saved...')
@@ -233,10 +238,10 @@ def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatch
         scheduler.step()
 
         # Save model every epoch
-        SaveName = CheckPointPath + str(Epochs) + "model.ckpt"
-        torch.save({"epoch": Epochs, "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": Optimizer.state_dict(), "loss": LossThisBatch}, SaveName)
-        print("\n" + SaveName + " Model Saved...")
+        # SaveName = CheckPointPath + str(Epochs) + "model.ckpt"
+        # torch.save({"epoch": Epochs, "model_state_dict": model.state_dict(),
+        #             "optimizer_state_dict": Optimizer.state_dict(), "loss": LossThisBatch}, SaveName)
+        # print("\n" + SaveName + " Model Saved...")
 
         logger.log(tag='plot')
 
@@ -250,15 +255,15 @@ def main():
     #"""
     # Parse Command Line arguments
     Parser = argparse.ArgumentParser()
-    Parser.add_argument("--DatasetPath", default="",help="Base path of images, Default:")
+    Parser.add_argument("--DatasetPath", default="HomographyDataset1",help="Base path of images, Default: HomographyDataset1")
     Parser.add_argument("--CheckPointPath", default="../Checkpoints/", help="Path to save Checkpoints, Default: ../Checkpoints/")
-    Parser.add_argument("--ModelType", default="Unsup", help="Model type, Supervised or Unsupervised? Choose from Sup and Unsup, Default:Unsup")
+    Parser.add_argument("--ModelType", default="Sup", help="Model type, Supervised or Unsupervised? Choose from Sup and Unsup, Default:Sup")
     Parser.add_argument("--NumEpochs", type=int, default=50, help="Number of Epochs to Train for, Default:50")
     Parser.add_argument("--DivTrain", type=int, default=1, help="Factor to reduce Train data by per epoch, Default:1")
-    Parser.add_argument("--MiniBatchSize", type=int, default=1, help="Size of the MiniBatch to use, Default:1")
+    Parser.add_argument("--MiniBatchSize", type=int, default=512, help="Size of the MiniBatch to use, Default:512")
     Parser.add_argument("--LoadCheckPoint", type=int, default=0, help="Load Model from latest Checkpoint from CheckPointsPath?, Default:0")
-    Parser.add_argument("--LogsPath", default="Logs/", help="Path to save Logs for Tensorboard, Default=Logs/")
-    Parser.add_argument('--LogDir', type=str, default='test_logs/', help='name of the log file')
+    Parser.add_argument("--LogsPath", default="Logs", help="Path to save Logs for Tensorboard, Default=Logs/")
+    Parser.add_argument('--LogDir', type=str, default='test_logs', help='name of the log file')
     Parser.add_argument("--LR", type=float, default=0.001, help="Learning Rate")
     Parser.add_argument("--WD", type=float, default=0.0001, help="Weight Decay")
     Parser.add_argument("--GradientClip", type=float, default=0.1, help="Gradient Clipping")
@@ -266,7 +271,7 @@ def main():
 
     Args = Parser.parse_args()
     NumEpochs = Args.NumEpochs
-    DatasetPath = Args.DatasetPath
+    DatasetPath = os.path.join('../Data', Args.DatasetPath)
     DivTrain = float(Args.DivTrain)
     MiniBatchSize = Args.MiniBatchSize
     LoadCheckPoint = Args.LoadCheckPoint
@@ -303,7 +308,7 @@ def main():
     # PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile)
 
     TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatchSize,
-                   CheckPointPath, LatestFile, LogsPath, ModelType,
+                   CheckPointPath, LatestFile, LogsPath, LogDir, ModelType,
                    LR, WD, GradientClip)
 
 

@@ -78,7 +78,7 @@ class Logger:
         elif tag == 'plot':
             self.plot(self.train_loss, name='Train Loss', path=self.plot_dir)
             self.plot(self.val_loss, name='Val Loss', path=self.plot_dir)
-            self.plot_both(self.train_loss, self.test_loss, name='Loss', path=self.plot_dir)
+            self.plot_both(self.train_loss, self.val_loss, name='Loss', path=self.plot_dir)
 
         self.log_file.close()
 

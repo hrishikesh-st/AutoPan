@@ -59,7 +59,8 @@ class DataGenerator:
                 perturbation = [np.random.randint(low=-self.max_perturbation, high=self.max_perturbation),
                                 np.random.randint(low=-self.max_perturbation, high=self.max_perturbation)]
                 C_B.append([C_A[_][0]+perturbation[0], C_A[_][1]+perturbation[1]])
-                H4pt.append(perturbation)
+                H4pt.append(perturbation[0])
+                H4pt.append(perturbation[1])
 
             H = self.find_homography(C_A, C_B)
             H_inv = np.linalg.pinv(H)
