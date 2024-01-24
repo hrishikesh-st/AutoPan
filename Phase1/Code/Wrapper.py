@@ -23,6 +23,80 @@ import argparse
 from skimage.feature import peak_local_max
 from natsort import natsorted
 
+np.random.seed(42)
+
+#############################################################################################
+#Source: https://stackoverflow.com/questions/68543804/image-stitching-problem-using-python-and-opencv
+
+def Convert_xy(x, y, f):
+    global center
+
+    xt = ( f * np.tan( (x - center[0]) / f ) ) + center[0]
+    yt = ( (y - center[1]) / np.cos( (x - center[0]) / f ) ) + center[1]
+    
+    return xt, yt
+
+
+def ProjectOntoCylinder(InitialImage, f):
+    global w, h, center
+    h, w = InitialImage.shape[:2]
+    center = [w // 2, h // 2]
+    # f = 1500       # 1100 field; 1000 Sun; 1500 Rainier; 1050 Helens
+    
+    # Creating a blank transformed image
+    TransformedImage = np.zeros(InitialImage.shape, dtype=np.uint8)
+    
+    # Storing all coordinates of the transformed image in 2 arrays (x and y coordinates)
+    AllCoordinates_of_ti =  np.array([np.array([i, j]) for i in range(w) for j in range(h)])
+    ti_x = AllCoordinates_of_ti[:, 0]
+    ti_y = AllCoordinates_of_ti[:, 1]
+    
+    # Finding corresponding coordinates of the transformed image in the initial image
+    ii_x, ii_y = Convert_xy(ti_x, ti_y, f)
+
+    # Rounding off the coordinate values to get exact pixel values (top-left corner)
+    ii_tl_x = ii_x.astype(int)
+    ii_tl_y = ii_y.astype(int)
+
+    # Finding transformed image points whose corresponding 
+    # initial image points lies inside the initial image
+    GoodIndices = (ii_tl_x >= 0) * (ii_tl_x <= (w-2)) * \
+                  (ii_tl_y >= 0) * (ii_tl_y <= (h-2))
+
+    # Removing all the outside points from everywhere
+    ti_x = ti_x[GoodIndices]
+    ti_y = ti_y[GoodIndices]
+    
+    ii_x = ii_x[GoodIndices]
+    ii_y = ii_y[GoodIndices]
+
+    ii_tl_x = ii_tl_x[GoodIndices]
+    ii_tl_y = ii_tl_y[GoodIndices]
+
+    # Bilinear interpolation
+    dx = ii_x - ii_tl_x
+    dy = ii_y - ii_tl_y
+
+    weight_tl = (1.0 - dx) * (1.0 - dy)
+    weight_tr = (dx)       * (1.0 - dy)
+    weight_bl = (1.0 - dx) * (dy)
+    weight_br = (dx)       * (dy)
+    
+    TransformedImage[ti_y, ti_x, :] = ( weight_tl[:, None] * InitialImage[ii_tl_y,     ii_tl_x,     :] ) + \
+                                      ( weight_tr[:, None] * InitialImage[ii_tl_y,     ii_tl_x + 1, :] ) + \
+                                      ( weight_bl[:, None] * InitialImage[ii_tl_y + 1, ii_tl_x,     :] ) + \
+                                      ( weight_br[:, None] * InitialImage[ii_tl_y + 1, ii_tl_x + 1, :] )
+
+
+    # Getting x coorinate to remove black region from right and left in the transformed image
+    min_x = min(ti_x)
+
+    # Cropping out the black region from both sides (using symmetricity)
+    TransformedImage = TransformedImage[:, min_x : -min_x, :]
+
+    return TransformedImage, ti_x-min_x, ti_y
+#############################################################################################
+
 def scale_image(image):
     # Sclaing the image to -1 to 1
     image = image / np.max(np.abs(image))
@@ -72,7 +146,7 @@ def anms(c_img, image, save_path, image_name, n_best=150, min_distance=3, thresh
     # Plot the peak local maximas
     for y, x in coordinates:
         cv2.drawMarker(_img_local_maxima, (x, y), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15, 2)
-    cv2.imwrite(os.path.join(save_path, "anms_local_maxima_"+image_name+".png"), _img_local_maxima) 
+    cv2.imwrite(os.path.join(save_path, "anms_local_maxima_"+image_name+".png"), _img_local_maxima)
 
 
     _r = np.ones(len(coordinates)) * np.inf
@@ -188,7 +262,85 @@ def ransac(mapping, tau, n_max=1000):
 
     return H_hat, inliers, inlier_matches
 
-def warp_two_images(image1, image2, H, save_path, alpha=0.86):
+def get_new_frame_size(image1_size, image2_size, H):
+
+    (h, w) = image1_size
+
+    initial_image_coords = np.array([[0, w, w, 0],
+                                     [0, 0, h, h],
+                                     [1, 1, 1, 1]])
+    transformed_image_coords = H @ initial_image_coords
+
+    [x, y, c] = transformed_image_coords
+    x = x / c
+    y = y / c
+
+    min_x, max_x = int(np.min(x)), int(np.max(x))
+    min_y, max_y = int(np.min(y)), int(np.max(y))
+
+    new_w = max_x
+    new_h = max_y
+    correction_factor = [0, 0]
+
+    if min_x < 0:
+        new_w = new_w - min_x
+        correction_factor[0] = abs(min_x)
+    if min_y < 0:
+        new_h = new_h - min_y
+        correction_factor[1] = abs(min_y)
+
+    if new_w < image2_size[1] + correction_factor[0]:
+        new_w = image2_size[1] + correction_factor[0]
+    if new_h < image2_size[0] + correction_factor[1]:
+        new_h = image2_size[0] + correction_factor[1]
+
+    x = x + correction_factor[0]
+    y = y + correction_factor[1]
+
+    initial_corner_points = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    transformed_corner_points = np.float32(np.array([x, y]).transpose())
+
+    H_dash = cv2.getPerspectiveTransform(initial_corner_points, transformed_corner_points)
+
+    return np.array([new_h, new_w]), correction_factor, H_dash
+
+
+def stitch_two_images(image1, image2, image2_x_mask, image2_y_mask, H, project=0):
+
+    # # image2_mask = np.zeros(image2.shape, dtype=np.uint8)
+    # # image2_mask[image2_y, image2_x, :] = 255
+
+    # new_frame_size, correction_factor, H_dash = get_new_frame_size(image1.shape[:2], image2.shape[:2], H)
+
+    # # stitched_image = np.zeros((new_frame_size[0], new_frame_size[1], 3), dtype=np.uint8)
+
+    # stitched_image = cv2.warpPerspective(image2, H_dash, (new_frame_size[1], new_frame_size[0]))
+    # stitched_image[correction_factor[1]:correction_factor[1]+image1.shape[0],
+    #                correction_factor[0]:correction_factor[0]+image1.shape[1]] = image1
+
+    # return stitched_image
+
+    if project:
+        image2_mask = np.zeros(image2.shape, dtype=np.uint8)
+        image2_mask[image2_y_mask[1], image2_x_mask[1], :] = 255
+    else:
+        image2_mask = np.ones(image2.shape, dtype=np.uint8)*255
+        # image2_mask = np.zeros(image2.shape, dtype=np.uint8)
+
+    new_frame_size, correction_factor, H_dash = get_new_frame_size(image1.shape[:2], image2.shape[:2], H)
+
+    image2_warped = cv2.warpPerspective(image2, H_dash, (new_frame_size[1], new_frame_size[0]))
+    image2_mask_warped = cv2.warpPerspective(image2_mask, H_dash, (new_frame_size[1], new_frame_size[0]))
+    image1_warped = np.zeros((new_frame_size[0], new_frame_size[1], 3), dtype=np.uint8)
+    image1_warped[correction_factor[1]:correction_factor[1]+image1.shape[0],
+                   correction_factor[0]:correction_factor[0]+image1.shape[1]] = image1
+
+    image1_masked = cv2.bitwise_and(image1_warped, cv2.bitwise_not(image2_mask_warped))
+    stitched_image = cv2.bitwise_or(image2_warped, image1_masked, )
+
+    return stitched_image
+
+def warp_two_images(image1, image2, H, alpha=0.86):
 
     h1, w1 = image1.shape[:2]
     h2, w2 = image2.shape[:2]
@@ -206,13 +358,13 @@ def warp_two_images(image1, image2, H, save_path, alpha=0.86):
     Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])  # translate
 
     result = cv2.warpPerspective(image2, Ht.dot(H), (xmax-xmin, ymax-ymin))
-    # Drawing a marker to visualise the translation
-    # Stitched image may conatain a red cross marker.
-    cv2.drawMarker(result, (int(t[0]), int(t[1])), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 15, 2)
-    cv2.imwrite(os.path.join(save_path, "result.png"), result)
+    # # Drawing a marker to visualise the translation
+    # # Stitched image may conatain a red cross marker.
+    # cv2.drawMarker(result, (int(t[0]), int(t[1])), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 15, 2)
+    # cv2.imwrite(os.path.join(save_path, "result.png"), result)
 
     # Current implementation of overlaying the images
-    """ result[t[1]:h1 + t[1], t[0]:w1 + t[0]] = image1 """
+    result[t[1]:h1 + t[1], t[0]:w1 + t[0]] = image1
 
 
     """
@@ -221,15 +373,15 @@ def warp_two_images(image1, image2, H, save_path, alpha=0.86):
     TODO: 1. Try weighted alpha blending.
           2. Poissons' blending.
     """
-    # Alpha blending
-    for y in range(h1):
-        for x in range(w1):
-            # Calculate the position in the result image
-            result_y = y + t[1]
-            result_x = x + t[0]
+    # # Alpha blending
+    # for y in range(h1):
+    #     for x in range(w1):
+    #         # Calculate the position in the result image
+    #         result_y = y + t[1]
+    #         result_x = x + t[0]
 
-            # Blend the pixel values
-            result[result_y, result_x] = alpha * image1[y, x] + (1 - alpha) * result[result_y, result_x]
+    #         # Blend the pixel values
+    #         result[result_y, result_x] = alpha * image1[y, x] + (1 - alpha) * result[result_y, result_x]
 
     return result
 
@@ -237,6 +389,7 @@ def main():
     # Add any Command Line arguments here
     Parser = argparse.ArgumentParser()
     Parser.add_argument('--Train', action='store_false', help='Choose the set to run the test on, Default:True')
+    Parser.add_argument('--Project', type=int, default=0, help='Perform Projective warping with sepficied focal length, Default:0')
     Parser.add_argument('--ImageSet', default="Set1", help='Choose the set to run the test on Options are Set1, Set2, Set3, CustomSet1, CustomSet2, Default:Set1')
 
     Args = Parser.parse_args()
@@ -252,8 +405,10 @@ def main():
     """
     print("Reading images...")
     images = read_images("../Data", ImageSet, Train)
+    project = Args.Project
 
     pair = [images[0], images[1]]
+    # pair = [images[1], images[0]]
     _idx = 1
     _iter = 0
 
@@ -269,7 +424,20 @@ def main():
 
         print("Iteration "+str(_iter))
 
-        for i, img in enumerate(pair):
+        x_masks = []
+        y_masks = []
+        transformed_pair = []
+        if project:
+            for image in pair:
+                transformed_image, x_mask, y_mask = ProjectOntoCylinder(image, f=project)
+                transformed_pair.append(transformed_image)
+                x_masks.append(x_mask)
+                y_masks.append(y_mask)
+        else:
+            transformed_pair = pair
+
+        for i, img in enumerate(transformed_pair):
+
             """
             Corner Detection
             Save Corner detection output as corners.png
@@ -303,15 +471,15 @@ def main():
         # [(a, b) for idx, a in enumerate(test_list) for b in test_list[idx + 1:]]
 
         matches, mapping = match_features(keypoints[0], feature_descriptors[0], keypoints[1], feature_descriptors[1])
-        _matched_img = cv2.drawMatches(pair[0], keypoints[0], pair[1], keypoints[1], matches, None, matchColor=(0, 255, 255), flags=2)
+        _matched_img = cv2.drawMatches(transformed_pair[0], keypoints[0], transformed_pair[1], keypoints[1], matches, None, matchColor=(0, 255, 255), flags=2)
         cv2.imwrite(os.path.join(save_path, "matching.png"), _matched_img)
 
         """
         Refine: RANSAC, Estimate Homography
         """
         print("RANSAC..."+str(_iter))
-        H, inliers, inlier_matches = ransac(mapping, tau=50, n_max=1000)
-        _matched_img = cv2.drawMatches(pair[0], keypoints[0], pair[1], keypoints[1], inlier_matches, None, matchColor=(0, 255, 0), flags=2)
+        H, inliers, inlier_matches = ransac(mapping, tau=50, n_max=1000) # H1to2
+        _matched_img = cv2.drawMatches(transformed_pair[0], keypoints[0], transformed_pair[1], keypoints[1], inlier_matches, None, matchColor=(0, 255, 0), flags=2)
         cv2.imwrite(os.path.join(save_path, "matching_inliers.png"), _matched_img)
 
         """
@@ -319,12 +487,14 @@ def main():
         Save Panorama output as mypano.png
         """
         print("Warping..."+str(_iter))
-        result = warp_two_images(pair[1], pair[0], H, save_path)
+        # result = stitch_two_images(transformed_pair[1], transformed_pair[0], x_masks, y_masks, H, project)
+        result = warp_two_images(transformed_pair[1], transformed_pair[0], H)
         cv2.imwrite(os.path.join(save_path, "mypano.png"), result)
 
         _idx += 1
         if _idx == len(images): break
         pair = [result, images[_idx]]
+        # pair = [images[_idx], result]
 
 
 if __name__ == "__main__":
