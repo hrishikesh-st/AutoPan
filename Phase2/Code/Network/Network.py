@@ -41,22 +41,21 @@ def LossFn(out, labels):
 
 
 class HomographyModel(nn.Module):
-    def __init__(self, ModelType):
+    def __init__(self, input_channels=6):
         super(HomographyModel, self).__init__()
-        if ModelType == 'Sup':
-            self.model = SupervisedNet()
+        self.model = SupervisedNet(input_channels)
 
     def forward(self, a, b):
         return self.model(a, b)
 
     def training_step(self, stacked_patches, labels):
         out = self.model(stacked_patches)
-        loss = LossFn(out, labels.float())
+        loss = torch.sqrt(LossFn(out, labels.float()))
         return loss
 
     def validation_step(self, stacked_patches, labels):
         out = self.model(stacked_patches)
-        loss = LossFn(out, labels)
+        loss = torch.sqrt(LossFn(out, labels))
         return loss.detach().cpu().numpy()
 
     def validation_epoch_end(self, outputs):
@@ -66,7 +65,7 @@ class HomographyModel(nn.Module):
 
 
 class SupervisedNet(nn.Module):
-    def __init__(self):
+    def __init__(self, input_channels=6):
         """
         Inputs:
         InputSize - Size of the Input
@@ -77,7 +76,7 @@ class SupervisedNet(nn.Module):
         # Fill your network initialization of choice here!
         #############################
         self.block_1 = nn.Sequential(
-            nn.Conv2d(6, 64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(input_channels, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),

@@ -7,28 +7,30 @@ from tqdm import tqdm
 from natsort import natsorted
 
 DATA_PATH = '../../Data/MSCOCO'
-SAVE_PATH = '../../Data/HomographyDataset'
+SAVE_PATH = '../../Data/TestSet'
 
 
 class DataGenerator:
 
-    def __init__(self, P_A_path, P_B_path, label_path, patch_size=128, max_perturbation=32, buffer=50, patches_per_image=10):
+    def __init__(self, P_A_path, P_B_path, label_path, images_path, patch_size=128, max_perturbation=32, max_translation=32, buffer=25, patches_per_image=1):
 
         self.P_A_path = P_A_path
         self.P_B_path = P_B_path
         self.label_path = label_path
+        self.images_path = images_path
 
         self.patch_size = patch_size
         self.max_perturbation = max_perturbation
+        self.max_translation = max_translation
         self.buffer = buffer
         self.patches_per_image = patches_per_image
 
     def find_homography(self, c_a, c_b):
 
         A = []
-        for _a, _b in zip(c_a, c_b):
-            x1, y1 = _a
-            x2, y2 = _b
+        for i in range(0, 8, 2):
+            x1, y1 = c_a[i], c_a[i+1]
+            x2, y2 = c_b[i], c_b[i+1]
             A.append([x1, y1, 1, 0, 0, 0, -x2*x1, -x2*y1, -x2])
             A.append([0, 0, 0, x1, y1, 1, -y2*x1, -y2*y1, -y2])
 
@@ -36,29 +38,31 @@ class DataGenerator:
 
         U, S, V = np.linalg.svd(A) # Single value decomposition
         H = np.reshape(V[-1], (3, 3))
-        H = (1 / H.item(8)) * H # TODO: Check logic
+        H = (1 / H.item(8)) * H
 
         return H
 
     def generate_data(self, image, image_name):
 
         h, w = image.shape
-        allowed_h = [self.buffer, h-(self.buffer+self.patch_size)]
-        allowed_w = [self.buffer, w-(self.buffer+self.patch_size)]
+        allowed_h = [self.buffer, h-(self.buffer+self.patch_size+self.max_translation)]
+        allowed_w = [self.buffer, w-(self.buffer+self.patch_size+self.max_translation)]
 
-        for i in range(self.patches_per_image):
+        for _ in range(self.patches_per_image):
 
             x = np.random.randint(low=allowed_w[0], high=allowed_w[1])
             y = np.random.randint(low=allowed_h[0], high=allowed_h[1])
+            translation = np.random.randint(self.max_translation)
 
-            C_A = [[x, y], [x+self.patch_size, y], [x, y+self.patch_size], [x+self.patch_size, y+self.patch_size]]
+            C_A = [x, y, x+self.patch_size, y, x, y+self.patch_size, x+self.patch_size, y+self.patch_size]
             C_B = []
             H4pt = []
 
-            for _ in range(4):
-                perturbation = [np.random.randint(low=-self.max_perturbation, high=self.max_perturbation),
-                                np.random.randint(low=-self.max_perturbation, high=self.max_perturbation)]
-                C_B.append([C_A[_][0]+perturbation[0], C_A[_][1]+perturbation[1]])
+            for i in range(0, 8, 2):
+                perturbation = [np.random.randint(low=-self.max_perturbation, high=self.max_perturbation)+translation,
+                                np.random.randint(low=-self.max_perturbation, high=self.max_perturbation)+translation]
+                C_B.append(C_A[i]+perturbation[0])
+                C_B.append(C_A[i+1]+perturbation[1])
                 H4pt.append(perturbation[0])
                 H4pt.append(perturbation[1])
 
@@ -75,9 +79,10 @@ class DataGenerator:
                 'C_A': C_A
             }
 
-            cv2.imwrite(os.path.join(self.P_A_path, image_name+'_'+str(i)+'.png'), P_A)
-            cv2.imwrite(os.path.join(self.P_B_path, image_name+'_'+str(i)+'.png'), P_B)
-            with open (os.path.join(self.label_path, image_name+'_'+str(i)+'.txt'), 'w') as f:
+            cv2.imwrite(os.path.join(self.P_A_path, image_name+'_'+str(_)+'.png'), P_A)
+            cv2.imwrite(os.path.join(self.P_B_path, image_name+'_'+str(_)+'.png'), P_B)
+            cv2.imwrite(os.path.join(self.images_path, image_name+'_tr.png'), transformed_img)
+            with open (os.path.join(self.label_path, image_name+'_'+str(_)+'.txt'), 'w') as f:
                 json.dump(label, f)
 
 
@@ -99,7 +104,10 @@ if __name__ == "__main__":
     labels_path = os.path.join(save_train_data, 'labels')
     if not os.path.exists(labels_path): os.makedirs(labels_path)
 
-    generator = DataGenerator(pa_path, pb_path, labels_path)
+    images_path = os.path.join(save_train_data, 'images')
+    if not os.path.exists(images_path): os.makedirs(images_path)
+
+    generator = DataGenerator(pa_path, pb_path, labels_path, images_path)
 
     for i, img_path in tqdm(enumerate(natsorted(os.listdir(org_train_data)))):
 

@@ -50,13 +50,36 @@ import math as m
 from tqdm import tqdm
 import json
 from natsort import natsorted
+import kornia
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 torch.manual_seed(42)
 np.random.seed(42)
 
-def GenerateBatch(DatasetPath, ImageNames, MiniBatchSize, train=True):
+def TensorDLT(H4pt, C_A):
+
+    H = torch.tensor([]).to(DEVICE)
+    for h4pt, c_a in zip(H4pt, C_A):
+        A = []
+        c_b = c_a + h4pt
+
+        for i in range(0, 8, 2):
+            x1, y1 = c_a[i], c_a[i+1]
+            x2, y2 = c_b[i], c_b[i+1]
+
+            A.append([x1, y1, 1, 0, 0, 0, -x2*x1, -x2*y1, -x2])
+            A.append([0, 0, 0, x1, y1, 1, -y2*x1, -y2*y1, -y2])
+
+        A = torch.tensor(A).to(DEVICE)
+        _, _, V = torch.linalg.svd(A)
+        h = V[-1]/V[-1][8]
+
+        H = torch.cat((H, torch.unsqueeze(h.reshape(3, -1), dim=0)), axis=0)
+
+    return H
+
+def GenerateBatch_unsupervised(DatasetPath, PatchNames, MiniBatchSize, train=True):
     """
     Inputs:
     BasePath - Path to COCO folder without "/" at the end
@@ -70,7 +93,58 @@ def GenerateBatch(DatasetPath, ImageNames, MiniBatchSize, train=True):
     I1Batch - Batch of images
     CoordinatesBatch - Batch of coordinates
     """
-    images_batch = []
+    patches_batch = []
+    C_A_batch = []
+    pa_batch = []
+    pb_batch = []
+
+    if train:
+        BasePath = os.path.join(DatasetPath, 'Train')
+    else:
+        BasePath = os.path.join(DatasetPath, 'Val')
+
+    pa_path = os.path.join(BasePath, 'P_A')
+    pb_path = os.path.join(BasePath, 'P_B')
+    labels_path = os.path.join(BasePath, 'labels')
+
+    ImageNum = 0
+    while ImageNum < MiniBatchSize:
+        # Generate random image
+        RandIdx = random.randint(0, len(PatchNames) - 1)
+
+        RandPatchName = PatchNames[RandIdx]
+        ImageNum += 1
+
+        P_A = np.expand_dims(cv2.imread(os.path.join(pa_path, RandPatchName), 0)/255.0, axis=0)
+        P_B = np.expand_dims(cv2.imread(os.path.join(pb_path, RandPatchName), 0)/255.0, axis=0)
+        label = json.load(open(os.path.join(labels_path, RandPatchName[:-4]+'.txt')))
+
+        stacked_patches = np.float32(np.concatenate([P_A, P_B], axis=0))
+        C_A = label['C_A']
+
+        # Append All Images and Mask
+        patches_batch.append(torch.from_numpy(stacked_patches).to(DEVICE))
+        C_A_batch.append(torch.tensor(C_A).to(DEVICE))
+        pa_batch.append(torch.tensor(P_A).to(DEVICE))
+        pb_batch.append(torch.tensor(P_B).to(DEVICE))
+
+    return torch.stack(patches_batch), torch.stack(C_A_batch), torch.stack(pa_batch), torch.stack(pb_batch)
+
+def GenerateBatch_supervised(DatasetPath, ImageNames, MiniBatchSize, train=True):
+    """
+    Inputs:
+    BasePath - Path to COCO folder without "/" at the end
+    DirNamesTrain - Variable with Subfolder paths to train files
+    NOTE that Train can be replaced by Val/Test for generating batch corresponding to validation (held-out testing in this case)/testing
+    TrainCoordinates - Coordinatess corresponding to Train
+    NOTE that TrainCoordinates can be replaced by Val/TestCoordinatess for generating batch corresponding to validation (held-out testing in this case)/testing
+    ImageSize - Size of the Image
+    MiniBatchSize is the size of the MiniBatch
+    Outputs:
+    I1Batch - Batch of images
+    CoordinatesBatch - Batch of coordinates
+    """
+    patches_batch = []
     H4pt_batch = []
 
     if train:
@@ -98,10 +172,10 @@ def GenerateBatch(DatasetPath, ImageNames, MiniBatchSize, train=True):
         H4pt = label['H4pt']
 
         # Append All Images and Mask
-        images_batch.append(torch.from_numpy(stacked_image).permute(2, 0, 1).to(DEVICE))
+        patches_batch.append(torch.from_numpy(stacked_image).permute(2, 0, 1).to(DEVICE))
         H4pt_batch.append(torch.tensor(H4pt).to(DEVICE))
 
-    return torch.stack(images_batch), torch.stack(H4pt_batch)
+    return torch.stack(patches_batch), torch.stack(H4pt_batch)
 
 
 def PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile):
@@ -139,7 +213,9 @@ def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatch
     Saves Trained network in CheckPointPath and Logs to LogsPath
     """
     # Predict output with forward pass
-    model = HomographyModel(ModelType=ModelType).to(DEVICE)
+    if ModelType == 'Sup': input_channels = 6
+    elif ModelType == 'Unsup': input_channels = 2
+    model = HomographyModel(input_channels).to(DEVICE)
 
     ###############################################
     # Fill your optimizer of choice here!
@@ -172,19 +248,34 @@ def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatch
         _train_loss = 0.0
         start = time.time()
         for PerEpochCounter in tqdm(range(NumIterationsPerEpoch)):
-            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesTrain, train_batchsize, train=True)
 
-            # Predict output with forward pass
-            # PredicatedCoordinatesBatch = model(I1Batch)
-            # LossThisBatch = LossFn(PredicatedCoordinatesBatch, CoordinatesBatch)
-            LossThisBatch = model.training_step(I1Batch, CoordinatesBatch)
+            if ModelType == 'Sup':
+                stacked_images_batch, h4pt_batch = GenerateBatch_supervised(DatasetPath, DirNamesTrain, train_batchsize, train=True)
 
-            Optimizer.zero_grad()
-            LossThisBatch.backward()
-            Optimizer.step()
+                LossThisBatch = model.training_step(stacked_images_batch, h4pt_batch)
 
-            if GradientClip:
-                torch.nn.utils.clip_grad_value_(model.parameters(), GradientClip)
+                Optimizer.zero_grad()
+                LossThisBatch.backward()
+                Optimizer.step()
+
+                if GradientClip:
+                    torch.nn.utils.clip_grad_value_(model.parameters(), GradientClip)
+            
+            elif ModelType == 'Unsup':
+                stacked_patches_batch, c_a_batch, pa_batch, pb_batch = GenerateBatch_unsupervised(DatasetPath, DirNamesTrain, train_batchsize, train=True)
+                H4pt_batch = model.model(stacked_patches_batch)
+                H_batch = TensorDLT(H4pt_batch*32, c_a_batch)
+                warped_pa_batch = kornia.geometry.transform.warp_perspective(pa_batch.float(), H_batch, (128, 128))
+
+                LossThisBatch = torch.nn.L1Loss()(warped_pa_batch, pb_batch.float())
+
+                H_batch.requires_grad = True
+                warped_pa_batch.requires_grad = True
+                LossThisBatch.requires_grad = True
+
+                Optimizer.zero_grad()
+                LossThisBatch.backward()
+                Optimizer.step()
 
             _train_loss += LossThisBatch.detach().cpu().numpy()
 
@@ -214,22 +305,30 @@ def TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatch
         start = time.time()
         NumIterationsPerEpoch = int(NumValSamples/val_batchsize)
         for PerEpochCounter in tqdm(range(NumIterationsPerEpoch)):
-            I1Batch, CoordinatesBatch = GenerateBatch(DatasetPath, DirNamesVal, val_batchsize, train=False)
-            _val_loss += model.validation_step(I1Batch, CoordinatesBatch)
+            
+            if ModelType == 'Sup':
+                I1Batch, CoordinatesBatch = GenerateBatch_supervised(DatasetPath, DirNamesVal, val_batchsize, train=False)
+                _val_loss += model.validation_step(I1Batch, CoordinatesBatch)
+            
+            elif ModelType == 'Unsup':
+                stacked_patches_batch, c_a_batch, pa_batch, pb_batch = GenerateBatch_unsupervised(DatasetPath, DirNamesVal, train_batchsize, train=False)
+                H4pt_batch = model.model(stacked_patches_batch)
+                H_batch = TensorDLT(H4pt_batch*32, c_a_batch)
+                warped_pa_batch = kornia.geometry.transform.warp_perspective(pa_batch.float(), H_batch, (128, 128))
+
+                _val_loss += torch.nn.L1Loss()(warped_pa_batch, pb_batch.float()).cpu().numpy()
 
         _val_loss /= PerEpochCounter+1
 
         if _val_loss < _best_loss:
             _best_loss = _val_loss
             SaveName = LogsPath + '/' + LogDir + '/' + 'model/best_model.pt'
-            # torch.save({'epoch': Epochs,'model_state_dict': model.state_dict(),'optimizer_state_dict': Optimizer.state_dict(),'test_loss': _test_loss}, SaveName)
             torch.save(model.state_dict(), SaveName)
             print('\n' + SaveName + ' Model Saved...')
             logger.log(tag='model', loss=_val_loss)
 
         if Epochs % 5 == 0:
             SaveName = LogsPath + '/' + LogDir + '/' + 'model/model'+str(Epochs)+'.pt'
-            # torch.save({'epoch': Epochs,'model_state_dict': model.state_dict(),'optimizer_state_dict': Optimizer.state_dict(),'test_loss': _test_loss}, SaveName)
             torch.save(model.state_dict(), SaveName)
             print('\n' + SaveName + ' Model Saved...')
 
@@ -287,12 +386,10 @@ def main():
     global logger
     logger = Logger(os.path.join(LogsPath, LogDir))
 
-    logger.log(tag='args', num_epochs=NumEpochs, mini_batch_size=MiniBatchSize,
+    logger.log(tag='args', num_epochs=NumEpochs, mini_batch_size=MiniBatchSize, ModelType=ModelType,
                lr=LR, weight_decay=WD, gradient_clip=GradientClip, msg=Msg)
 
     # Setup all needed parameters including file reading
-    # (DirNamesTrain, SaveCheckPoint, ImageSize, NumTrainSamples, TrainCoordinates, NumClasses) = SetupAll(BasePath, CheckPointPath)
-
     train_path = os.path.join(DatasetPath, 'Train')
     val_path = os.path.join(DatasetPath, 'Val')
     DirNamesTrain = natsorted(os.listdir(os.path.join(train_path, 'P_A')))
@@ -303,9 +400,6 @@ def main():
         LatestFile = FindLatestModel(CheckPointPath)
     else:
         LatestFile = None
-
-    # Pretty print stats
-    # PrettyPrint(NumEpochs, DivTrain, MiniBatchSize, NumTrainSamples, LatestFile)
 
     TrainOperation(DatasetPath, DirNamesTrain, DirNamesVal, NumEpochs, MiniBatchSize,
                    CheckPointPath, LatestFile, LogsPath, LogDir, ModelType,
