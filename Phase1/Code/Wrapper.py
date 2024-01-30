@@ -44,7 +44,7 @@ def detect_corners(image, save_path, image_name):
 
     # Apply Harris Corner Detection
     image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    corner_det_image = cv2.cornerHarris(image_gray, blockSize=7, ksize=11, k=0.04)
+    corner_det_image = cv2.cornerHarris(image_gray, blockSize=7, ksize=11, k=0.06)
     corner_det_image = scale_image(corner_det_image)
 
     _img = image.copy()
@@ -59,13 +59,7 @@ def detect_corners(image, save_path, image_name):
     return corner_det_image
 
 
-def anms(c_img, image, save_path, image_name, n_best=150, min_distance=3, threshold=0.0075):
-    """
-    TODO: Check logic of the code. Especially effect of line 80.
-    Comparing each corner with every other corner is giving "visually" correct results.
-    The current implementation compares each corner with itself and all the corners preceding it.
-    """
-
+def anms(c_img, image, save_path, image_name, n_best=200, min_distance=3, threshold=0.01):
     coordinates = peak_local_max(c_img, min_distance=min_distance, threshold_rel=threshold)
 
     _img_local_maxima = image.copy()
@@ -79,7 +73,7 @@ def anms(c_img, image, save_path, image_name, n_best=150, min_distance=3, thresh
     _ED = None
 
     for i in range(len(coordinates)):
-        for j in range(i, len(coordinates)):
+        for j in range(len(coordinates)):
             if(c_img[coordinates[i][0], coordinates[i][1]] < c_img[coordinates[j][0], coordinates[j][1]]):
                 _ED = (coordinates[i][0] - coordinates[j][0])**2 + (coordinates[i][1] - coordinates[j][1])**2
 
@@ -138,7 +132,7 @@ def match_features(kp1, fd1, kp2, fd2):
             matches.append(cv2.DMatch(i, _best_match, _best_dist_1))
             mapping.append([kp1[i].pt[0], kp1[i].pt[1], kp2[_best_match].pt[0], kp2[_best_match].pt[1], i, _best_match, _best_dist_1])
 
-    return matches, mapping
+    return matches, mapping, 
 
 def find_homography(pairs):
 
@@ -160,6 +154,8 @@ def ransac(mapping, tau, n_max=1000):
 
     inliers = []
     inlier_matches = []
+    valid_stitch = True
+
     for i in range(n_max):
         pairs = [mapping[i] for i in np.random.choice(len(mapping), 4)]
         H = find_homography(pairs)
@@ -185,10 +181,13 @@ def ransac(mapping, tau, n_max=1000):
             break
 
     H_hat = find_homography(inliers)
+    if len(inliers) < 4:
+        valid_stitch = False
 
-    return H_hat, inliers, inlier_matches
+    return H_hat, inliers, inlier_matches, valid_stitch
 
-def warp_two_images(image1, image2, H, save_path, alpha=0.86):
+
+def warp_two_images(image1, image2, H, save_path, alpha=0.8, blending=False, poisson=False):
 
     h1, w1 = image1.shape[:2]
     h2, w2 = image2.shape[:2]
@@ -200,48 +199,55 @@ def warp_two_images(image1, image2, H, save_path, alpha=0.86):
     [xmin, ymin] = np.int32(p.min(axis=0).ravel() - 0.5)
     [xmax, ymax] = np.int32(p.max(axis=0).ravel() + 0.5)
 
-    print(f"xmin: {xmin}, ymin: {ymin}, xmax: {xmax}, ymax: {ymax}")
-
     t = [-xmin, -ymin]
     Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])  # translate
 
     result = cv2.warpPerspective(image2, Ht.dot(H), (xmax-xmin, ymax-ymin))
-    # Drawing a marker to visualise the translation
-    # Stitched image may conatain a red cross marker.
-    cv2.drawMarker(result, (int(t[0]), int(t[1])), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 15, 2)
-    cv2.imwrite(os.path.join(save_path, "result.png"), result)
+    
 
-    # Current implementation of overlaying the images
-    """ result[t[1]:h1 + t[1], t[0]:w1 + t[0]] = image1 """
+    if blending:
+        if poisson:
+            # Define the mask for seamlessClone
+            mask = 255 * np.ones_like(image1, dtype=np.uint8)
+            
+            # Find the overlapping region of the two images and define the mask
+            cv2.imwrite(os.path.join(save_path, "mask.png"), mask)
 
+            # Perform Poisson blending
+            result = cv2.seamlessClone(image1, result, mask, (int(t[0] + w1/2), int(t[1] + h1/2)), cv2.NORMAL_CLONE)
+            # Visualize the center of the image
+            # cv2.drawMarker(result, (int(t[0] + w1 / 2), int(t[1] + h1 / 2)), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15, 2)
 
-    """
-    Very basic implementation of alpha blending.
-    The blended image still has visible artifacts.
-    TODO: 1. Try weighted alpha blending.
-          2. Poissons' blending.
-    """
-    # Alpha blending
-    for y in range(h1):
-        for x in range(w1):
-            # Calculate the position in the result image
-            result_y = y + t[1]
-            result_x = x + t[0]
+        else:
+            # Weighted Alpha blending
+            for y in range(h1):
+                for x in range(w1):
+                    # Calculate the position in the result image
+                    result_y = y + t[1]
+                    result_x = x + t[0]
 
-            # Blend the pixel values
-            result[result_y, result_x] = alpha * image1[y, x] + (1 - alpha) * result[result_y, result_x]
+                    # Ensure the pixel is within the bounds of the result image
+                    if 0 <= result_x < result.shape[1] and 0 <= result_y < result.shape[0]:
+                        # Blend the pixel values using weighted alpha
+                        result[result_y, result_x] = alpha * image1[y, x] + (1 - alpha) * result[result_y, result_x]
+    else:
+        result[t[1]:h1 + t[1], t[0]:w1 + t[0]] = image1
 
     return result
 
 def main():
     # Add any Command Line arguments here
     Parser = argparse.ArgumentParser()
-    Parser.add_argument('--Train', action='store_false', help='Choose the set to run the test on, Default:True')
+    Parser.add_argument('--Train', action='store_true', help='Choose the set to run the test on, Default:True')
     Parser.add_argument('--ImageSet', default="Set1", help='Choose the set to run the test on Options are Set1, Set2, Set3, CustomSet1, CustomSet2, Default:Set1')
+    Parser.add_argument('-p', '--Poisson', action='store_true', help='Choose whether to use Poisson blending or not, Default:False')
+    Parser.add_argument('-b', '--blending', action='store_true', help='Choose whether to use Blending or not, Default:False')
 
     Args = Parser.parse_args()
     Train = Args.Train
     ImageSet = Args.ImageSet
+    Poisson = Args.Poisson
+    blending = Args.blending
 
     results_dir = os.path.join("../Results", ImageSet)
     if not os.path.exists(results_dir):
@@ -254,6 +260,7 @@ def main():
     images = read_images("../Data", ImageSet, Train)
 
     pair = [images[0], images[1]]
+    # pair = [images[1], images[0]]
     _idx = 1
     _iter = 0
 
@@ -284,7 +291,7 @@ def main():
             Save ANMS output as anms.png
             """
             print("ANMS..."+str(i))
-            keypoints_ = anms(c_img, img, save_path, str(i), min_distance=3)
+            keypoints_ = anms(c_img, img, save_path, str(i), min_distance=9)
             keypoints.append(keypoints_)
 
             """
@@ -300,7 +307,6 @@ def main():
         Save Feature Matching output as matching.png
         """
         print("Feature Matching..."+str(_iter))
-        # [(a, b) for idx, a in enumerate(test_list) for b in test_list[idx + 1:]]
 
         matches, mapping = match_features(keypoints[0], feature_descriptors[0], keypoints[1], feature_descriptors[1])
         _matched_img = cv2.drawMatches(pair[0], keypoints[0], pair[1], keypoints[1], matches, None, matchColor=(0, 255, 255), flags=2)
@@ -310,21 +316,29 @@ def main():
         Refine: RANSAC, Estimate Homography
         """
         print("RANSAC..."+str(_iter))
-        H, inliers, inlier_matches = ransac(mapping, tau=50, n_max=1000)
+        H, inliers, inlier_matches, valid_stitch = ransac(mapping, tau=55, n_max=1000)
         _matched_img = cv2.drawMatches(pair[0], keypoints[0], pair[1], keypoints[1], inlier_matches, None, matchColor=(0, 255, 0), flags=2)
         cv2.imwrite(os.path.join(save_path, "matching_inliers.png"), _matched_img)
+
+        if not valid_stitch:
+            print("Not a valid stitch. Moving to the next image in sequence...")
+            _idx += 1
+            if _idx == len(images): break
+            pair = [result, images[_idx]]
+            continue
 
         """
         Image Warping + Blending
         Save Panorama output as mypano.png
         """
         print("Warping..."+str(_iter))
-        result = warp_two_images(pair[1], pair[0], H, save_path)
+        result = warp_two_images(pair[1], pair[0], H, save_path, blending=blending, poisson=Poisson)
         cv2.imwrite(os.path.join(save_path, "mypano.png"), result)
 
         _idx += 1
         if _idx == len(images): break
         pair = [result, images[_idx]]
+        # pair = [images[_idx], result]
 
 
 if __name__ == "__main__":
