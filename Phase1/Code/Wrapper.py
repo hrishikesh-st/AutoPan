@@ -132,7 +132,7 @@ def match_features(kp1, fd1, kp2, fd2):
             matches.append(cv2.DMatch(i, _best_match, _best_dist_1))
             mapping.append([kp1[i].pt[0], kp1[i].pt[1], kp2[_best_match].pt[0], kp2[_best_match].pt[1], i, _best_match, _best_dist_1])
 
-    return matches, mapping, 
+    return matches, mapping
 
 def find_homography(pairs):
 
@@ -146,7 +146,7 @@ def find_homography(pairs):
 
     U, S, V = np.linalg.svd(A) # Single value decomposition
     H = np.reshape(V[-1], (3, 3))
-    H = (1 / H.item(8)) * H # TODO: Check logic
+    H = (1 / H.item(8)) * H
 
     return H
 
@@ -169,7 +169,7 @@ def ransac(mapping, tau, n_max=1000):
             y2_hat = _H[3]*x1 + _H[4]*y1 + _H[5]
             z2_hat = _H[6]*x1 + _H[7]*y1 + _H[8]
 
-            if abs(x2_hat/(z2_hat+1e-6) - x2) + abs(y2_hat/(z2_hat+1e-6) - y2) < tau: # TODO: Check logic
+            if abs(x2_hat/(z2_hat+1e-6) - x2) + abs(y2_hat/(z2_hat+1e-6) - y2) < tau:
                 temp_inliers.append([x1, y1, x2, y2, i, j, _dist])
                 temp_matches.append(cv2.DMatch(i, j, _dist))
 
@@ -203,13 +203,12 @@ def warp_two_images(image1, image2, H, save_path, alpha=0.8, blending=False, poi
     Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])  # translate
 
     result = cv2.warpPerspective(image2, Ht.dot(H), (xmax-xmin, ymax-ymin))
-    
 
     if blending:
         if poisson:
             # Define the mask for seamlessClone
             mask = 255 * np.ones_like(image1, dtype=np.uint8)
-            
+
             # Find the overlapping region of the two images and define the mask
             cv2.imwrite(os.path.join(save_path, "mask.png"), mask)
 
@@ -283,8 +282,6 @@ def main():
             """
             print("Corner detection..."+str(i))
             c_img = detect_corners(img, save_path, str(i))
-            # TODO: Apply threshold relative to standard deviation
-            # Currently, the threshold is 0.01 * max value of the standardized corner detection output
 
             """
             Perform ANMS: Adaptive Non-Maximal Suppression
