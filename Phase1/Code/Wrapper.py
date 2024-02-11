@@ -19,126 +19,432 @@ import cv2
 
 # Add any python libraries here
 import os
-import os.path as osp
 import argparse
-import distutils.util
+from skimage.feature import peak_local_max
+from natsort import natsorted
 
+def scale_image(image):
+    """
+    Scale the image to -1 to 1
+    """
+    image = image / np.max(np.abs(image))
+    return image.astype(np.float32)
+
+def read_images(data_dir, set, train=True):
+    """
+    Read images from the data directory
+
+    :param data_dir: Path to the data directory
+    :type data_dir: str
+    :param set: Set to read images from
+    :type set: str
+    :param train: Train dataset, defaults to True
+    :type train: bool, optional
+    :return: List of images
+    :rtype: list
+    """
+    images = []
+    image_path = os.path.join(data_dir, "Train" if train else "Test", set)
+
+    for image_name in natsorted(os.listdir(image_path)):
+        image = cv2.imread(os.path.join(image_path, image_name))
+        if image is not None:
+            images.append(image)
+
+    return images
+
+def detect_corners(image, save_path, image_name):
+    """
+    Detect corners in the image using Harris Corner Detection
+
+    :param image: Input image
+    :type image: np.array
+    :param save_path: Path to save the output
+    :type save_path: str
+    :param image_name: Name of the image
+    :type image_name: str
+    :return: Corner detection output
+    :rtype: np.array
+    """
+
+    # Apply Harris Corner Detection
+    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    corner_det_image = cv2.cornerHarris(image_gray, blockSize=7, ksize=11, k=0.06)
+    corner_det_image = scale_image(corner_det_image)
+
+    _img = image.copy()
+    corners = np.argwhere(corner_det_image > 0.0075 * corner_det_image.max())
+
+    for y, x in corners:
+        cv2.drawMarker(_img, (x, y), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15   , 2)
+
+    # Save the corner detection output
+    cv2.imwrite(os.path.join(save_path, "corners_harris_"+image_name+".png"), _img)
+
+    return corner_det_image
+
+
+def anms(c_img, image, save_path, image_name, n_best=200, min_distance=3, threshold=0.01):
+    """
+    Perform Adaptive Non-Maximal Suppression (ANMS) to select the best corners
+
+    :param c_img: Corner detection output
+    :type c_img: np.array
+    :param image: Input image
+    :type image: np.array
+    :param save_path: Path to save the output
+    :type save_path: str
+    :param image_name: Name of the image
+    :type image_name: str
+    :param n_best: Number of best corners to select, defaults to 200
+    :type n_best: int, optional
+    :param min_distance: Minimum distance between the corners, defaults to 3
+    :type min_distance: int, optional
+    :param threshold: Threshold for peak local maximas, defaults to 0.01
+    :type threshold: float, optional
+    :return: Keypoints
+    :rtype: list
+    """
+    coordinates = peak_local_max(c_img, min_distance=min_distance, threshold_rel=threshold)
+
+    _img_local_maxima = image.copy()
+    # Plot the peak local maximas
+    for y, x in coordinates:
+        cv2.drawMarker(_img_local_maxima, (x, y), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15, 2)
+    cv2.imwrite(os.path.join(save_path, "anms_local_maxima_"+image_name+".png"), _img_local_maxima) 
+
+
+    _r = np.ones(len(coordinates)) * np.inf
+    _ED = None
+
+    for i in range(len(coordinates)):
+        for j in range(len(coordinates)):
+            if(c_img[coordinates[i][0], coordinates[i][1]] < c_img[coordinates[j][0], coordinates[j][1]]):
+                _ED = (coordinates[i][0] - coordinates[j][0])**2 + (coordinates[i][1] - coordinates[j][1])**2
+
+            if _ED is not None and _ED < _r[i]:
+                _r[i] = _ED
+
+    best_corners_idx = np.argsort(_r)[::-1][:n_best]
+    best_corners = coordinates[best_corners_idx]
+    keypoints = []
+
+    _img = image.copy()
+    for corner in best_corners:
+        keypoints.append(cv2.KeyPoint(float(corner[1]), float(corner[0]), 1))
+        cv2.drawMarker(_img, (corner[1], corner[0]), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15, 2)
+    cv2.imwrite(os.path.join(save_path, "ANMS_"+image_name+".png"), _img)
+
+    return keypoints
+
+def get_feature_descriptors(image, keypoints):
+    """
+    Get feature descriptors for the keypoints
+
+    :param image: Input image
+    :type image: np.array
+    :param keypoints: Keypoints
+    :type keypoints: list
+    :return: Feature Descriptors
+    :rtype: list
+    """
+    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _img = cv2.copyMakeBorder(image_gray, 20, 20, 20, 20, cv2.BORDER_CONSTANT, None, value=0) # padding
+    patch = np.zeros((41, 41))
+    feature_descriptors = []
+
+    for point in keypoints:
+        patch = _img[int(point.pt[1]):int(point.pt[1])+41, int(point.pt[0]):int(point.pt[0])+41].copy()
+        blurred_patch = cv2.GaussianBlur(patch, (5, 5), 0)
+        subsampled_patch = cv2.resize(blurred_patch, (8, 8))
+        subsampled_vector = subsampled_patch.flatten()
+        normalized_vector = (subsampled_vector-np.mean(subsampled_vector))/np.std(subsampled_vector)
+        feature_descriptors.append(normalized_vector)
+
+    return feature_descriptors
+
+def match_features(kp1, fd1, kp2, fd2):
+    """
+    Match features between two sets of keypoints and feature descriptors
+
+    :param kp1: Keypoints 1
+    :type kp1: list
+    :param fd1: Feature Descriptors 1
+    :type fd1: list
+    :param kp2: Keypoints 2
+    :type kp2: list
+    :param fd2: Feature Descriptors 2
+    :type fd2: list
+    :return: Matches, Mapping
+    :rtype: list, list
+    """
+
+    matches = []
+    mapping = []
+
+    for i, f1 in enumerate(fd1):
+        _best_dist_1 = np.inf
+        _best_dist_2 = np.inf
+        _best_match = 0
+
+        for j, f2 in enumerate(fd2):
+            _dist = np.linalg.norm(f1-f2)
+            if _dist < _best_dist_1:
+                _best_dist_2 = _best_dist_1
+                _best_dist_1 = _dist
+                _best_match = j
+            elif _dist < _best_dist_2:
+                _best_dist_2 = _dist
+
+        if _best_dist_1/_best_dist_2 < 0.75:
+            matches.append(cv2.DMatch(i, _best_match, _best_dist_1))
+            mapping.append([kp1[i].pt[0], kp1[i].pt[1], kp2[_best_match].pt[0], kp2[_best_match].pt[1], i, _best_match, _best_dist_1])
+
+    return matches, mapping
+
+def find_homography(pairs):
+    """
+    Find the homography matrix using the pairs of points
+
+    :param pairs: Pairs of points
+    :type pairs: list
+    :return: Homography matrix
+    :rtype: np.array
+    """
+
+    A = []
+    for pair in pairs:
+        x1, y1, x2, y2, _, _, _ = pair
+        A.append([x1, y1, 1, 0, 0, 0, -x2*x1, -x2*y1, -x2])
+        A.append([0, 0, 0, x1, y1, 1, -y2*x1, -y2*y1, -y2])
+
+    A = np.array(A)
+
+    U, S, V = np.linalg.svd(A) # Single value decomposition
+    H = np.reshape(V[-1], (3, 3))
+    H = (1 / H.item(8)) * H
+
+    return H
+
+def ransac(mapping, tau, n_max=1000):
+    """
+    Perform RANSAC to estimate the homography matrix
+
+    :param mapping: Mapping between the keypoints
+    :type mapping: list
+    :param tau: Threshold for RANSAC
+    :type tau: float
+    :param n_max: Maximum number of iterations, defaults to 1000
+    :type n_max: int, optional
+    :return: Homography matrix, Inliers, Inlier Matches, Valid Stitch
+    :rtype: np.array, list, list, bool
+    """
+
+    inliers = []
+    inlier_matches = []
+    valid_stitch = True
+
+    for i in range(n_max):
+        pairs = [mapping[i] for i in np.random.choice(len(mapping), 4)]
+        H = find_homography(pairs)
+
+        temp_inliers = []
+        temp_matches = []
+        for pair in mapping:
+            x1, y1, x2, y2, i, j, _dist = pair
+            _H = H.flatten().tolist()
+            x2_hat = _H[0]*x1 + _H[1]*y1 + _H[2]
+            y2_hat = _H[3]*x1 + _H[4]*y1 + _H[5]
+            z2_hat = _H[6]*x1 + _H[7]*y1 + _H[8]
+
+            if abs(x2_hat/(z2_hat+1e-6) - x2) + abs(y2_hat/(z2_hat+1e-6) - y2) < tau:
+                temp_inliers.append([x1, y1, x2, y2, i, j, _dist])
+                temp_matches.append(cv2.DMatch(i, j, _dist))
+
+        if len(temp_inliers) > len(inliers):
+            inliers = temp_inliers
+            inlier_matches = temp_matches
+
+        if len(inliers) >= 0.9*len(mapping):
+            break
+
+    H_hat = find_homography(inliers)
+    if len(inliers) < 4:
+        valid_stitch = False
+
+    return H_hat, inliers, inlier_matches, valid_stitch
+
+
+def warp_two_images(image1, image2, H, save_path, alpha=0.8, blending=False, poisson=False):
+    """
+    Warp two images using the homography matrix
+
+    :param image1: Image 1 to warp
+    :type image1: np.array
+    :param image2: Image 2 to warp
+    :type image2: np.array
+    :param H: Homography matrix
+    :type H: np.array
+    :param save_path: Path to save the output
+    :type save_path: str
+    :param alpha: Weight for alpha blending, defaults to 0.8
+    :type alpha: float, optional
+    :param blending: Perform blending, defaults to False
+    :type blending: bool, optional
+    :param poisson: Perform Poisson blending, defaults to False
+    :type poisson: bool, optional
+    :return: Warped image
+    :rtype: np.array
+    """
+
+    h1, w1 = image1.shape[:2]
+    h2, w2 = image2.shape[:2]
+    p1 = np.float32([[0, 0], [0, h1], [w1, h1], [w1, 0]]).reshape(-1, 1, 2)
+    p2 = np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
+    p2_ = cv2.perspectiveTransform(p2, H)
+    p = np.concatenate((p1, p2_), axis=0)
+
+    [xmin, ymin] = np.int32(p.min(axis=0).ravel() - 0.5)
+    [xmax, ymax] = np.int32(p.max(axis=0).ravel() + 0.5)
+
+    t = [-xmin, -ymin]
+    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])  # translate
+
+    result = cv2.warpPerspective(image2, Ht.dot(H), (xmax-xmin, ymax-ymin))
+
+    if blending:
+        if poisson:
+            # Define the mask for seamlessClone
+            mask = 255 * np.ones_like(image1, dtype=np.uint8)
+
+            # Find the overlapping region of the two images and define the mask
+            cv2.imwrite(os.path.join(save_path, "mask.png"), mask)
+
+            # Perform Poisson blending
+            result = cv2.seamlessClone(image1, result, mask, (int(t[0] + w1/2), int(t[1] + h1/2)), cv2.NORMAL_CLONE)
+
+            # Visualize the center of the image
+            # cv2.drawMarker(result, (int(t[0] + w1 / 2), int(t[1] + h1 / 2)), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 15, 2)
+
+        else:
+            # Weighted Alpha blending
+            for y in range(h1):
+                for x in range(w1):
+                    # Calculate the position in the result image
+                    result_y = y + t[1]
+                    result_x = x + t[0]
+
+                    # Ensure the pixel is within the bounds of the result image
+                    if 0 <= result_x < result.shape[1] and 0 <= result_y < result.shape[0]:
+                        # Blend the pixel values using weighted alpha
+                        result[result_y, result_x] = alpha * image1[y, x] + (1 - alpha) * result[result_y, result_x]
+    else:
+        result[t[1]:h1 + t[1], t[0]:w1 + t[0]] = image1
+
+    return result
 
 def main():
     # Add any Command Line arguments here
     Parser = argparse.ArgumentParser()
-    Parser.add_argument('--NumFeatures', default=100, type=int, help='Number of best features to extract from each image, Default:100')
-    Parser.add_argument('--SelectTrain', type=lambda x: bool(distutils.util.strtobool(x)), default=True, help='Choose the set to run the test on, Default:True')
+    Parser.add_argument('--Train', action='store_true', help='Choose the set to run the test on, Default:True')
     Parser.add_argument('--ImageSet', default="Set1", help='Choose the set to run the test on Options are Set1, Set2, Set3, CustomSet1, CustomSet2, Default:Set1')
-    Parser.add_argument('--SelectDetector', default="Harris", help='Choose the detector to use Options are Harris, ShiTomasi, Default:Harris')
-    
+    Parser.add_argument('-p', '--Poisson', action='store_true', help='Choose whether to use Poisson blending or not, Default:False')
+    Parser.add_argument('-b', '--blending', action='store_true', help='Choose whether to use Blending or not, Default:False')
 
     Args = Parser.parse_args()
-    NumFeatures = Args.NumFeatures
-    SelectTrain = Args.SelectTrain
+    Train = Args.Train
     ImageSet = Args.ImageSet
-    SelectDetector = Args.SelectDetector
+    Poisson = Args.Poisson
+    blending = Args.blending
+
+    results_dir = os.path.join("../Results", ImageSet)
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
 
     """
     Read a set of images for Panorama stitching
     """
-    # Initialize the list of images
-    DATA = "../Data"
-    images = []
+    print("Reading images...")
+    images = read_images("../Data", ImageSet, Train)
 
-	# Initialize the flag for data selection and select set of images
-    # train = True
-    # image_set = "Set1" # Options are Set1, Set2, Set3, CustomSet1, CustomSet2
-    image_path = osp.join(DATA, "Train" if SelectTrain else "Test", ImageSet)
+    pair = [images[0], images[1]]
+    # pair = [images[1], images[0]]
+    _idx = 1
+    _iter = 0
 
-    # Create directory to save the results
-    results_dir_path = osp.join(DATA, "Results")
-    if not osp.exists(results_dir_path):
-        os.makedirs(results_dir_path)
+    while(True):
 
-	# Read and save data in grayscale
-    for image_name in os.listdir(image_path):
-        # Read image
-        image = cv2.imread(osp.join(image_path, image_name))
-        if image is not None:
-            image_grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            images.append([image_name, image_grayscale.astype(np.float32)])
+        _iter += 1
+        keypoints = []
+        feature_descriptors = []
 
-    """
-	Corner Detection
-	Save Corner detection output as corners.png
-	"""
-    # Sanity check
-    for image in images: # image is a list of [image_name, image_grayscale]
+        save_path = os.path.join(results_dir, "Iter_"+str(_iter))
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
 
-        og_image = cv2.imread(osp.join(image_path, image[0]))
-        """"    
-        # Sanity Checks
-        print(f"Shape for {image[0]} is {image[1].shape}")
-        print(f"Type for {image[0]} is {type(image[1])} with dtype {image[1].dtype}")
-        print("*" * 33)
+        print("Iteration "+str(_iter))
+
+        for i, img in enumerate(pair):
+            """
+            Corner Detection
+            Save Corner detection output as corners.png
+            """
+            print("Corner detection..."+str(i))
+            c_img = detect_corners(img, save_path, str(i))
+
+            """
+            Perform ANMS: Adaptive Non-Maximal Suppression
+            Save ANMS output as anms.png
+            """
+            print("ANMS..."+str(i))
+            keypoints_ = anms(c_img, img, save_path, str(i), min_distance=9)
+            keypoints.append(keypoints_)
+
+            """
+            Feature Descriptors
+            Save Feature Descriptor output as FD.png
+            """
+            print("Feature Descriptors..."+str(i))
+            feature_descriptors_ = get_feature_descriptors(img, keypoints_)
+            feature_descriptors.append(feature_descriptors_)
+
         """
-        if SelectDetector == "Harris":
-            print("Detecting corners using Harris Corner Detector")
-            # Apply Harris Corner Detection
-            corner_det_image = cv2.cornerHarris(image[1], blockSize=7, ksize=11, k=0.04)
-            
-            """
-            # Save the corner detection output for visualization
-            cv2.imwrite(osp.join(results_dir_path, f"corners_{image[0]}"), corner_det_image)
-            """
+        Feature Matching
+        Save Feature Matching output as matching.png
+        """
+        print("Feature Matching..."+str(_iter))
 
-            corner_det_image = cv2.dilate(corner_det_image, None)
+        matches, mapping = match_features(keypoints[0], feature_descriptors[0], keypoints[1], feature_descriptors[1])
+        _matched_img = cv2.drawMatches(pair[0], keypoints[0], pair[1], keypoints[1], matches, None, matchColor=(0, 255, 255), flags=2)
+        cv2.imwrite(os.path.join(save_path, "matching.png"), _matched_img)
 
-            # Read the original image for plotting corners
-            og_image[corner_det_image > 0.01 * corner_det_image.max()] = [0, 0, 255]
+        """
+        Refine: RANSAC, Estimate Homography
+        """
+        print("RANSAC..."+str(_iter))
+        H, inliers, inlier_matches, valid_stitch = ransac(mapping, tau=55, n_max=1000)
+        _matched_img = cv2.drawMatches(pair[0], keypoints[0], pair[1], keypoints[1], inlier_matches, None, matchColor=(0, 255, 0), flags=2)
+        cv2.imwrite(os.path.join(save_path, "matching_inliers.png"), _matched_img)
 
-            # Save the corner detection output
-            corner_image_path = osp.join(results_dir_path, f"corners_harris_{image[0]}")
-            cv2.imwrite(corner_image_path, og_image)
+        if not valid_stitch:
+            print("Not a valid stitch. Moving to the next image in sequence...")
+            _idx += 1
+            if _idx == len(images): break
+            pair = [result, images[_idx]]
+            continue
 
+        """
+        Image Warping + Blending
+        Save Panorama output as mypano.png
+        """
+        print("Warping..."+str(_iter))
+        result = warp_two_images(pair[1], pair[0], H, save_path, blending=blending, poisson=Poisson)
+        cv2.imwrite(os.path.join(save_path, "mypano.png"), result)
 
-        elif SelectDetector == "ShiTomasi":
-            print("Detecting corners using Shi-Tomasi Corner Detector")
-            # Shi-Tomasi Corner Detection
-            # Specify the number of corners, Default: 100
-            num_corners = NumFeatures 
-            corners = cv2.goodFeaturesToTrack(image[1], num_corners, 0.01, 10)
-
-            if corners is not None:
-                # Draw corners on the original image
-                for i in corners:
-                    x, y = i.ravel()
-                    cv2.circle(og_image, (int(x), int(y)), 3, (0, 255, 0), -1)  # Ensure coordinates are integers
-
-            # Save the Shi-Tomasi corner detection output
-            shi_tomasi_image_path = osp.join(results_dir_path, f"corners_shi_tomasi_{image[0]}")
-            cv2.imwrite(shi_tomasi_image_path, og_image)
-
-
-    """
-	Perform ANMS: Adaptive Non-Maximal Suppression
-	Save ANMS output as anms.png
-	"""
-
-    """
-	Feature Descriptors
-	Save Feature Descriptor output as FD.png
-	"""
-
-    """
-	Feature Matching
-	Save Feature Matching output as matching.png
-	"""
-
-    """
-	Refine: RANSAC, Estimate Homography
-	"""
-
-    """
-	Image Warping + Blending
-	Save Panorama output as mypano.png
-	"""
+        _idx += 1
+        if _idx == len(images): break
+        pair = [result, images[_idx]]
+        # pair = [images[_idx], result]
 
 
 if __name__ == "__main__":
